@@ -363,6 +363,7 @@ Resources:
       Value: "localhost"
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
+
 #Single Server running everything
   WordpressEC2:
     Type: AWS::EC2::Instance
@@ -373,21 +374,21 @@ Resources:
       InstanceType: "t2.micro"
       ImageId: !Ref LatestAmiId
       IamInstanceProfile: !Ref WordpressInstanceProfile
-      SubnetId: !Ref SubnetPublicA
+      SubnetId: !Ref SNPUBA
       SecurityGroupIds: 
         - !Ref SGWordpress
       Tags:
         - Key: Name
-          Value: Wordpress-single-server
+          Value: Wordpress-Manual
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
           # Step 4 - Import parameter store values
-          DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-          DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-          DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-          DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-          DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
+          DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /A4L/Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+          DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /A4L/Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+          DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /A4L/Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+          DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /A4L/Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
+          DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /A4L/Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
           # Step 1 - System Updates
           dnf -y update
           dnf -y upgrade
@@ -424,7 +425,8 @@ Resources:
           echo "GRANT ALL ON $DBName.* TO '$DBUser'@'localhost';" >> /tmp/db.setup
           echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
           mysql -u root --password=$DBRootPassword < /tmp/db.setup
-          sudo rm /tmp/db.setup          
+          sudo rm /tmp/db.setup
+          
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
 
