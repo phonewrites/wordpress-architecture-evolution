@@ -318,7 +318,7 @@ Resources:
       Value: "localhost"
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
-#Single Server running everything
+# Single Server launched from an EC2 Launch Template
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -426,7 +426,6 @@ Resources:
             echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
             mysql -u root --password=$DBRootPassword < /tmp/db.setup
             sudo rm /tmp/db.setup
-
   
   WordpressEC2:
     Type: AWS::EC2::Instance
@@ -442,8 +441,3 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-LT-built
-
-
-
-
-

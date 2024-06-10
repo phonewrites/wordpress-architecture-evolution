@@ -318,7 +318,7 @@ Resources:
       Value: "localhost"
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
-#Single Server running everything
+# Single Server running everything
   WordpressEC2:
     Type: AWS::EC2::Instance
     CreationPolicy:
