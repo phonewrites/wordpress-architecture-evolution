@@ -293,51 +293,6 @@ Resources:
       Runtime: python3.9
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupDescription: Restricted access to Wordpress instances
-      SecurityGroupIngress: 
-        - Description: 'Allow HTTP IPv4 ingress'
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: "access-ssm-key"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: AccessSSMkey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource:
-                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
 
 # Parameters for storing all the important config items
   DBName:
@@ -370,7 +325,7 @@ Resources:
       ResourceSignal:
         Timeout: PT10M
     Properties:
-      InstanceType: "t2.micro"
+      InstanceType: t2.micro
       ImageId: !Ref LatestAmiId
       IamInstanceProfile: !Ref WordpressInstanceProfile
       SubnetId: !Ref SubnetPublicA
@@ -378,22 +333,22 @@ Resources:
         - !Ref SGWordpress
       Tags:
         - Key: Name
-          Value: Wordpress-single-server
+          Value: Wordpress-solo-built
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
-          # Step 4 - Import parameter store values
+          # Step 1 - Import parameter store values
           DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
           DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
           DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
           DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
           DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-          # Step 1 - System Updates
+          # Step 2 - System Updates
           dnf -y update
           dnf -y upgrade
-          # Step 2 - Install system software - including Web and DB
+          # Step 3 - Install system software - including Web and DB
           dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress -y
-          # Step 3 - Web and DB Servers Online - and set to startup
+          # Step 4 - Web and DB Servers Online - and set to startup
           systemctl enable httpd
           systemctl enable mariadb
           systemctl start httpd
@@ -427,4 +382,50 @@ Resources:
           sudo rm /tmp/db.setup          
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Restricted access to Wordpress instances
+      SecurityGroupIngress: 
+        - Description: 'Allow HTTP IPv4 ingress'
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "access-ssm-key"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AccessSSMkey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
+# WordpressEC2 can be improved further with cfn-init & cfn-hup within this stage
