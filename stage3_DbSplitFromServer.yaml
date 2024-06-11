@@ -1,12 +1,12 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description:  Wordpress app AWS architecture evolution - Stage 2
+Description:  Wordpress app AWS architecture evolution - Stage 3
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
 Resources:
-# Initial network skeleton with public subnets only for this project
+# Network skeleton with Db subnets added for this project
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -64,6 +64,104 @@ Resources:
       Tags:
         - Key: Name
           Value: sn-public-C
+  SubnetDbA:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.125.48.0/20
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: 
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '03::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
+      Tags:
+        - Key: Name
+          Value: sn-db-A
+  SubnetDbB:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: 10.125.64.0/20
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: 
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '04::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
+      Tags:
+        - Key: Name
+          Value: sn-db-B
+  SubnetDbC:
+    Type: AWS::EC2::Subnet
+    DependsOn: IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      CidrBlock: 10.125.80.0/20
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: 
+        Fn::Sub:
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '05::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
+      Tags:
+        - Key: Name
+          Value: sn-db-C
+
+  # SubnetAppA:
+  #   Type: AWS::EC2::Subnet
+  #   DependsOn: IPv6CidrBlock
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     AvailabilityZone: !Select [ 0, !GetAZs '' ]
+  #     CidrBlock: 10.125.96.0/20
+  #     AssignIpv6AddressOnCreation: true
+  #     Ipv6CidrBlock: 
+  #       Fn::Sub:
+  #         - "${VpcPart}${SubnetPart}"
+  #         - SubnetPart: '06::/64'
+  #           VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
+  #     Tags:
+  #       - Key: Name
+  #         Value: sn-app-A
+  # SubnetAppB:
+  #   Type: AWS::EC2::Subnet
+  #   DependsOn: IPv6CidrBlock
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     AvailabilityZone: !Select [ 1, !GetAZs '' ]
+  #     CidrBlock: 10.125.112.0/20
+  #     AssignIpv6AddressOnCreation: true
+  #     Ipv6CidrBlock: 
+  #       Fn::Sub:
+  #         - "${VpcPart}${SubnetPart}"
+  #         - SubnetPart: '07::/64'
+  #           VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
+  #     Tags:
+  #       - Key: Name
+  #         Value: sn-app-B
+  # SubnetAppC:
+  #   Type: AWS::EC2::Subnet
+  #   DependsOn: IPv6CidrBlock
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     AvailabilityZone: !Select [ 2, !GetAZs '' ]
+  #     CidrBlock: 10.125.128.0/20
+  #     AssignIpv6AddressOnCreation: true
+  #     Ipv6CidrBlock: 
+  #       Fn::Sub:
+  #         - "${VpcPart}${SubnetPart}"
+  #         - SubnetPart: '08::/64'
+  #           VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
+  #     Tags:
+  #       - Key: Name
+  #         Value: sn-app-C
+
   IPv6CidrBlock:
     Type: AWS::EC2::VPCCidrBlock
     Properties:
@@ -345,3 +443,17 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-LT-built
+
+# RDS setup to split the DB from WordpressEC2 
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: "WordPressRDSSubnetGroup"     
+      DBSubnetGroupDescription: "RDS Subnet Group for the WordPress DB"
+      SubnetIds: 
+        - !Ref SubnetDbA
+        - !Ref SubnetDbB
+        - !Ref SubnetDbC
+      Tags:
+        - Key: Name
+          Value: "WordPressRDSSubnetGroup"

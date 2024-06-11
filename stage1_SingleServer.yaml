@@ -6,7 +6,7 @@ Parameters:
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
 Resources:
-# Network skeleton for this project
+# Initial network skeleton with public subnets only for this project
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -27,7 +27,7 @@ Resources:
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '03::/64'
+          - SubnetPart: '00::/64'
             VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
       Tags:
         - Key: Name
@@ -43,7 +43,7 @@ Resources:
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '07::/64'
+          - SubnetPart: '01::/64'
             VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
       Tags:
         - Key: Name
@@ -59,107 +59,11 @@ Resources:
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '0B::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-public-C
-  SubnetAppA:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 0, !GetAZs '' ]
-      CidrBlock: 10.125.48.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
           - SubnetPart: '02::/64'
             VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
       Tags:
         - Key: Name
-          Value: sn-app-A
-  SubnetAppB:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 1, !GetAZs '' ]
-      CidrBlock: 10.125.64.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '06::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-app-B
-  SubnetAppC:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 2, !GetAZs '' ]
-      CidrBlock: 10.125.80.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '0A::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-app-C
-  SubnetDbA:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 0, !GetAZs '' ]
-      CidrBlock: 10.125.96.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '01::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-db-A
-  SubnetDbB:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 1, !GetAZs '' ]
-      CidrBlock: 10.125.112.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '05::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-db-B
-  SubnetDbC:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 2, !GetAZs '' ]
-      CidrBlock: 10.125.128.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '09::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-db-C
+          Value: sn-public-C
   IPv6CidrBlock:
     Type: AWS::EC2::VPCCidrBlock
     Properties:
