@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description:  Wordpress app AWS architecture evolution - Stage 1
+Description:  Wordpress app AWS architecture evolution - Stage 2
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
@@ -318,70 +318,7 @@ Resources:
       Value: "localhost"
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
-# Single Server running everything
-  WordpressEC2:
-    Type: AWS::EC2::Instance
-    CreationPolicy:
-      ResourceSignal:
-        Timeout: PT10M
-    Properties:
-      InstanceType: t2.micro
-      ImageId: !Ref LatestAmiId
-      IamInstanceProfile: !Ref WordpressInstanceProfile
-      SubnetId: !Ref SubnetPublicA
-      SecurityGroupIds: 
-        - !Ref SGWordpress
-      Tags:
-        - Key: Name
-          Value: Wordpress-solo-built
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash -xe
-          # Step 1 - Import parameter store values
-          DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-          DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-          DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-          DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-          DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-          # Step 2 - System Updates
-          dnf -y update
-          dnf -y upgrade
-          # Step 3 - Install system software - including Web and DB
-          dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress -y
-          # Step 4 - Web and DB Servers Online - and set to startup
-          systemctl enable httpd
-          systemctl enable mariadb
-          systemctl start httpd
-          systemctl start mariadb
-          # Step 5 - Set MariaDB Root Password
-          mysqladmin -u root password $DBRootPassword
-          # Step 6 - Download & install Wordpress
-          wget http://wordpress.org/latest.tar.gz -P /var/www/html
-          cd /var/www/html
-          tar -zxvf latest.tar.gz
-          cp -rvf wordpress/* .
-          sudo rm -R wordpress
-          sudo rm latest.tar.gz
-          # Step 7 - Configure Wordpress
-          sudo cp ./wp-config-sample.php ./wp-config.php
-          sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
-          sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
-          sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
-          # Step 8 - Fix the permissions
-          usermod -a -G apache ec2-user   
-          chown -R ec2-user:apache /var/www
-          chmod 2775 /var/www
-          find /var/www -type d -exec chmod 2775 {} \;
-          find /var/www -type f -exec chmod 0664 {} \;
-          # Step 9 Create Wordpress DB
-          echo "CREATE DATABASE $DBName;" >> /tmp/db.setup
-          echo "CREATE USER '$DBUser'@'localhost' IDENTIFIED BY '$DBPassword';" >> /tmp/db.setup
-          echo "GRANT ALL ON $DBName.* TO '$DBUser'@'localhost';" >> /tmp/db.setup
-          echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
-          mysql -u root --password=$DBRootPassword < /tmp/db.setup
-          sudo rm /tmp/db.setup          
-          # STEP 10 Signal end of installation & configuration
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
+# Single Server launched from an EC2 Launch Template
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -428,4 +365,79 @@ Resources:
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
-# WordpressEC2 can be improved further with cfn-init & cfn-hup within this stage
+  WordpressLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "Wordpress"
+      VersionDescription: "Deploys instance with app & database"
+      LaunchTemplateData: 
+        ImageId: !Ref LatestAmiId
+        InstanceType: t2.micro
+        SecurityGroupIds:
+          - !GetAtt SGWordpress.GroupId
+        IamInstanceProfile:
+          Arn: !GetAtt WordpressInstanceProfile.Arn          
+        DisableApiTermination: true
+        CreditSpecification:
+          CpuCredits: Standard
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            # Step 1 - Import parameter store values
+            DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+            DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+            DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+            DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
+            DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
+            # Step 2 - System Updates
+            dnf -y update
+            dnf -y upgrade
+            # Step 3 - Install system software - including Web and DB
+            dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress -y
+            # Step 4 - Web and DB Servers Online - and set to startup
+            systemctl enable httpd
+            systemctl enable mariadb
+            systemctl start httpd
+            systemctl start mariadb
+            # Step 5 - Set MariaDB Root Password
+            mysqladmin -u root password $DBRootPassword
+            # Step 6 - Download & install Wordpress
+            wget http://wordpress.org/latest.tar.gz -P /var/www/html
+            cd /var/www/html
+            tar -zxvf latest.tar.gz
+            cp -rvf wordpress/* .
+            sudo rm -R wordpress
+            sudo rm latest.tar.gz
+            # Step 7 - Configure Wordpress
+            sudo cp ./wp-config-sample.php ./wp-config.php
+            sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
+            sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
+            sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
+            # Step 8 - Fix the permissions
+            usermod -a -G apache ec2-user   
+            chown -R ec2-user:apache /var/www
+            chmod 2775 /var/www
+            find /var/www -type d -exec chmod 2775 {} \;
+            find /var/www -type f -exec chmod 0664 {} \;
+            # Step 9 Create Wordpress DB
+            echo "CREATE DATABASE $DBName;" >> /tmp/db.setup
+            echo "CREATE USER '$DBUser'@'localhost' IDENTIFIED BY '$DBPassword';" >> /tmp/db.setup
+            echo "GRANT ALL ON $DBName.* TO '$DBUser'@'localhost';" >> /tmp/db.setup
+            echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
+            mysql -u root --password=$DBRootPassword < /tmp/db.setup
+            sudo rm /tmp/db.setup
+  
+  WordpressEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref SubnetPublicA
+      SecurityGroupIds: 
+        - !Ref SGWordpress
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WordpressLaunchTemplate
+        Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: Wordpress-LT-built
