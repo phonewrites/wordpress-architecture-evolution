@@ -325,6 +325,7 @@ Resources:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
+      GroupName: "wordpress-sg"
       GroupDescription: Restricted access to Wordpress instances
       SecurityGroupIngress: 
         - Description: 'Allow HTTP IPv4 ingress'
@@ -457,3 +458,29 @@ Resources:
       Tags:
         - Key: Name
           Value: "WordPressRDSSubnetGroup"
+
+  RDSinstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: mysql
+      EngineVersion: 8.0.32
+      MultiAZ: false
+      DBInstanceIdentifier: "{{resolve:ssm:/Wordpress/DBName}}"
+      MasterUsername: "{{resolve:ssm:/Wordpress/DBUser}}"
+      MasterUserPassword: "{{resolve:ssm-secure:/Wordpress/DBPassword}}"
+      DBInstanceClass: "db.t3.micro"
+      # StorageType: gp2
+      AllocatedStorage: 20
+      # NetworkType: IPV4
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      # PubliclyAccessible: false
+      VPCSecurityGroups:
+        - !Ref SGWordpress
+      AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
+      #This param is mandatory for MySQL engine
+      #"Initial database name" in console-ui
+      DBName: "{{resolve:ssm:/Wordpress/DBName}}"
+
+
+# RDSinstance can be improved further with RDS proxy within this stage
