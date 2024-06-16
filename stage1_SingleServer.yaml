@@ -5,8 +5,9 @@ Parameters:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+    
 Resources:
-# Initial network skeleton with public subnets only for this project
+# Initial network skeleton with public subnets only
   VPC:
     Type: AWS::EC2::VPC
     Properties:
