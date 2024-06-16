@@ -227,9 +227,10 @@ Resources:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
-      GroupDescription: Restricted access to Wordpress instances
+      GroupName: wordpress-sg
+      GroupDescription: "Restricted access to Wordpress instances"
       SecurityGroupIngress: 
-        - Description: 'Allow HTTP IPv4 ingress'
+        - Description: "Allow HTTP IPv4 ingress"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
