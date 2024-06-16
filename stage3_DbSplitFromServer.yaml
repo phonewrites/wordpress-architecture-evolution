@@ -1,3 +1,4 @@
+# Refer to the .md file for this stage on how to create the other pre-requisite parameters.
 AWSTemplateFormatVersion: 2010-09-09
 Description:  Wordpress app AWS architecture evolution - Stage 3
 Parameters:
@@ -5,8 +6,9 @@ Parameters:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+
 Resources:
-# Network skeleton with Db subnets added for this project
+# Network skeleton with Db subnets added for this stage of the project
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -112,56 +114,6 @@ Resources:
       Tags:
         - Key: Name
           Value: sn-db-C
-
-  # SubnetAppA:
-  #   Type: AWS::EC2::Subnet
-  #   DependsOn: IPv6CidrBlock
-  #   Properties:
-  #     VpcId: !Ref VPC
-  #     AvailabilityZone: !Select [ 0, !GetAZs '' ]
-  #     CidrBlock: 10.125.96.0/20
-  #     AssignIpv6AddressOnCreation: true
-  #     Ipv6CidrBlock: 
-  #       Fn::Sub:
-  #         - "${VpcPart}${SubnetPart}"
-  #         - SubnetPart: '06::/64'
-  #           VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-  #     Tags:
-  #       - Key: Name
-  #         Value: sn-app-A
-  # SubnetAppB:
-  #   Type: AWS::EC2::Subnet
-  #   DependsOn: IPv6CidrBlock
-  #   Properties:
-  #     VpcId: !Ref VPC
-  #     AvailabilityZone: !Select [ 1, !GetAZs '' ]
-  #     CidrBlock: 10.125.112.0/20
-  #     AssignIpv6AddressOnCreation: true
-  #     Ipv6CidrBlock: 
-  #       Fn::Sub:
-  #         - "${VpcPart}${SubnetPart}"
-  #         - SubnetPart: '07::/64'
-  #           VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-  #     Tags:
-  #       - Key: Name
-  #         Value: sn-app-B
-  # SubnetAppC:
-  #   Type: AWS::EC2::Subnet
-  #   DependsOn: IPv6CidrBlock
-  #   Properties:
-  #     VpcId: !Ref VPC
-  #     AvailabilityZone: !Select [ 2, !GetAZs '' ]
-  #     CidrBlock: 10.125.128.0/20
-  #     AssignIpv6AddressOnCreation: true
-  #     Ipv6CidrBlock: 
-  #       Fn::Sub:
-  #         - "${VpcPart}${SubnetPart}"
-  #         - SubnetPart: '08::/64'
-  #           VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-  #     Tags:
-  #       - Key: Name
-  #         Value: sn-app-C
-
   IPv6CidrBlock:
     Type: AWS::EC2::VPCCidrBlock
     Properties:
@@ -296,43 +248,40 @@ Resources:
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
 
-# Parameters for storing all the important config items
-  DBName:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: "/Wordpress/DBName"
-      Description: "Wordpress Database Name"
-      Type: String
-      Value: "wordpressdb"
-  DBUser:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: "/Wordpress/DBUser"
-      Description: "Wordpress Database User"
-      Type: String
-      Value: "wordpressuser"
   DBEndpoint:
     Type: AWS::SSM::Parameter
     Properties:
       Name: "/Wordpress/DBEndpoint"
       Description: "Wordpress Endpoint Name"
       Type: String
-      Value: "localhost"
-# Refer to the .md file for Stage 1 on how to create SecureString parameters.
+      Value: !GetAtt RDSinstance.Endpoint.Address
 
 # Single Server launched from an EC2 Launch Template
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
-      GroupName: "wordpress-sg"
-      GroupDescription: Restricted access to Wordpress instances
+      GroupName: wordpress-sg
+      GroupDescription: "Restricted access to Wordpress instances"
       SecurityGroupIngress: 
-        - Description: 'Allow HTTP IPv4 ingress'
+        - Description: "Allow HTTP IPv4 ingress"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
           CidrIp: '0.0.0.0/0'
+  SGDatabase:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: database-sg
+      GroupDescription: "Controlled access to Database"
+      SecurityGroupIngress: 
+        - Description: "Allow MySQL ingress"
+          IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          SourceSecurityGroupId: !Ref SGWordpress
+
   WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
     Properties:
@@ -370,6 +319,8 @@ Resources:
 
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
+    DependsOn:
+      - DBEndpoint
     Properties:
       LaunchTemplateName: "Wordpress"
       VersionDescription: "Deploys instance with app & database"
@@ -399,11 +350,8 @@ Resources:
             dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress -y
             # Step 4 - Web and DB Servers Online - and set to startup
             systemctl enable httpd
-            systemctl enable mariadb
             systemctl start httpd
-            systemctl start mariadb
             # Step 5 - Set MariaDB Root Password
-            mysqladmin -u root password $DBRootPassword
             # Step 6 - Download & install Wordpress
             wget http://wordpress.org/latest.tar.gz -P /var/www/html
             cd /var/www/html
@@ -423,22 +371,11 @@ Resources:
             chmod 2775 /var/www
             find /var/www -type d -exec chmod 2775 {} \;
             find /var/www -type f -exec chmod 0664 {} \;
-            # Step 9 Create Wordpress DB
-            echo "CREATE DATABASE $DBName;" >> /tmp/db.setup
-            echo "CREATE USER '$DBUser'@'localhost' IDENTIFIED BY '$DBPassword';" >> /tmp/db.setup
-            echo "GRANT ALL ON $DBName.* TO '$DBUser'@'localhost';" >> /tmp/db.setup
-            echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
-            mysql -u root --password=$DBRootPassword < /tmp/db.setup
-            sudo rm /tmp/db.setup
   
   WordpressEC2:
     Type: AWS::EC2::Instance
     Properties:
-      # InstanceType: t2.micro
-      # ImageId: !Ref LatestAmiId
       SubnetId: !Ref SubnetPublicA
-      # SecurityGroupIds: 
-      #   - !Ref SGWordpress
       LaunchTemplate:
         LaunchTemplateId: !Ref WordpressLaunchTemplate
         Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
@@ -446,7 +383,6 @@ Resources:
         - Key: Name
           Value: Wordpress-LT-built
 
-# RDS setup to split the DB from WordpressEC2 
   RDSSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -459,7 +395,6 @@ Resources:
       Tags:
         - Key: Name
           Value: "WordPressRDSSubnetGroup"
-
   RDSinstance:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Delete
@@ -467,9 +402,9 @@ Resources:
       Engine: mysql
       EngineVersion: 8.0.32
       MultiAZ: false
-      DBInstanceIdentifier: "{{resolve:ssm:/Wordpress/DBName}}"
-      MasterUsername: "{{resolve:ssm:/Wordpress/DBUser}}"
-      MasterUserPassword: "{{resolve:ssm-secure:/Wordpress/DBPassword}}"
+      DBInstanceIdentifier: "{{resolve:ssm:/Wordpress/DBName:1:1718558224308}}"
+      MasterUsername: "{{resolve:ssm:/Wordpress/DBUser:1:1718558250608}}"
+      MasterUserPassword: "{{resolve:ssm-secure:/Wordpress/DBPassword:1:1718557697915}}"
       DBInstanceClass: "db.t3.micro"
       # StorageType: gp2
       AllocatedStorage: 20
@@ -477,11 +412,10 @@ Resources:
       DBSubnetGroupName: !Ref RDSSubnetGroup
       # PubliclyAccessible: false
       VPCSecurityGroups:
-        - !Ref SGWordpress
+        - !Ref SGDatabase
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
       #This param is mandatory for MySQL engine
       #"Initial database name" in console-ui
-      DBName: "{{resolve:ssm:/Wordpress/DBName}}"
-
+      DBName: "{{resolve:ssm:/Wordpress/DBName:1:1718558224308}}"
 
 # RDSinstance can be improved further with RDS proxy within this stage
