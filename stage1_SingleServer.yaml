@@ -223,6 +223,53 @@ Resources:
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server running everything
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: wordpress-sg
+      GroupDescription: "Restricted access to Wordpress instances"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 ingress"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "access-ssm-key"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AccessSSMkey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+
   WordpressEC2:
     Type: AWS::EC2::Instance
     CreationPolicy:
@@ -271,6 +318,7 @@ Resources:
           sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
           sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
           sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
+          sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
           # Step 8 - Fix the permissions
           usermod -a -G apache ec2-user   
           chown -R ec2-user:apache /var/www
@@ -286,50 +334,5 @@ Resources:
           sudo rm /tmp/db.setup          
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupDescription: Restricted access to Wordpress instances
-      SecurityGroupIngress: 
-        - Description: 'Allow HTTP IPv4 ingress'
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: "access-ssm-key"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: AccessSSMkey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource:
-                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
 # WordpressEC2 can be improved further with cfn-init & cfn-hup within this stage
