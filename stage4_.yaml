@@ -1,3 +1,4 @@
+# Refer to the .md file for this stage on how to create the other pre-requisite parameters.
 AWSTemplateFormatVersion: 2010-09-09
 Description:  Wordpress app AWS architecture evolution - Stage 4
 Parameters:
@@ -6,7 +7,7 @@ Parameters:
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
 Resources:
-# Initial network skeleton with public subnets only for this project
+# Network skeleton with App subnets added for this stage of the project
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -316,7 +317,6 @@ Resources:
       Description: "Wordpress Endpoint Name"
       Type: String
       Value: !GetAtt RDSinstance.Endpoint.Address
-# Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server launched from an EC2 Launch Template
   SGWordpress:
@@ -492,19 +492,19 @@ Resources:
       #"Initial database name" in console-ui
       DBName: "{{resolve:ssm:/Wordpress/DBName}}"
 
-  WordpressEFS:
-    Type: 'AWS::EFS::FileSystem'
-    Properties:
-      FileSystemTags:
-        - Key: Name
-          Value: "wordpress-efs"
-      BackupPolicy:
-        Status: ENABLED
-      LifecyclePolicies:
-        - TransitionToIA: AFTER_30_DAYS
-      Encrypted: false
-      ThroughputMode: bursting
-      PerformanceMode: generalPurpose
+  # WordpressEFS:
+  #   Type: 'AWS::EFS::FileSystem'
+  #   Properties:
+  #     FileSystemTags:
+  #       - Key: Name
+  #         Value: "wordpress-efs"
+  #     BackupPolicy:
+  #       Status: ENABLED
+  #     LifecyclePolicies:
+  #       - TransitionToIA: AFTER_30_DAYS
+  #     Encrypted: false
+  #     ThroughputMode: bursting
+  #     PerformanceMode: generalPurpose
 
   #     AvailabilityZoneName: us-east-1a
   #     FileSystemPolicy:
@@ -516,43 +516,44 @@ Resources:
   #           Principal:
   #               AWS: 'arn:aws:iam::111122223333:role/EfsReadOnly'
 
-  MountTargetA:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref WordpressEFS
-      SubnetId: !Ref SubnetAppA
-      SecurityGroups:
-      - !GetAtt SGEFS.GroupId
-  MountTargetB:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref WordpressEFS
-      SubnetId: !Ref SubnetAppB
-      SecurityGroups:
-      - !GetAtt SGEFS.GroupId
-  MountTargetC:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref WordpressEFS
-      SubnetId: !Ref SubnetAppC
-      SecurityGroups:
-      - !GetAtt SGEFS.GroupId
+# This...
+  # MountTargetA:
+  #   Type: AWS::EFS::MountTarget
+  #   Properties:
+  #     FileSystemId: !Ref WordpressEFS
+  #     SubnetId: !Ref SubnetAppA
+  #     SecurityGroups:
+  #     - !GetAtt SGEFS.GroupId
+  # MountTargetB:
+  #   Type: AWS::EFS::MountTarget
+  #   Properties:
+  #     FileSystemId: !Ref WordpressEFS
+  #     SubnetId: !Ref SubnetAppB
+  #     SecurityGroups:
+  #     - !GetAtt SGEFS.GroupId
+  # MountTargetC:
+  #   Type: AWS::EFS::MountTarget
+  #   Properties:
+  #     FileSystemId: !Ref WordpressEFS
+  #     SubnetId: !Ref SubnetAppC
+  #     SecurityGroups:
+  #     - !GetAtt SGEFS.GroupId
+# ... or this:
+  # Fn::ForEach::Instances:
+  # - zone
+  # - [A, B, C]
+  # - 'MountTarget${zone}':
+  #     Type: AWS::EFS::MountTarget
+  #     Properties:
+  #       FileSystemId: !Ref WordpressEFS
+  #       SubnetId: !Ref 'SubnetApp${zone}'
+  #       SecurityGroups:
+  #       - !GetAtt SGEFS.GroupId
 
-  Fn::ForEach::Instances:
-  - zone
-  - [A, B, C]
-  - 'MountTarget${zone}':
-      Type: AWS::EFS::MountTarget
-      Properties:
-        FileSystemId: !Ref WordpressEFS
-        SubnetId: !Ref 'SubnetApp${zone}'
-        SecurityGroups:
-        - !GetAtt SGEFS.GroupId
-
-  EFSfsid:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: "/Wordpress/EFSfsid"
-      Description: "File System ID of the EFS resource for storing Wordpress content"
-      Type: String
-      Value: !GetAtt WordpressEFS.FileSystemId
+  # EFSfsid:
+  #   Type: AWS::SSM::Parameter
+  #   Properties:
+  #     Name: "/Wordpress/EFSfsid"
+  #     Description: "File System ID of the EFS resource for storing Wordpress content"
+  #     Type: String
+  #     Value: !GetAtt WordpressEFS.FileSystemId
