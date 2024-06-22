@@ -5,8 +5,9 @@ Parameters:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+    
 Resources:
-# Network skeleton for this project
+# Initial network skeleton with public subnets only
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -27,7 +28,7 @@ Resources:
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '03::/64'
+          - SubnetPart: '00::/64'
             VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
       Tags:
         - Key: Name
@@ -43,7 +44,7 @@ Resources:
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '07::/64'
+          - SubnetPart: '01::/64'
             VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
       Tags:
         - Key: Name
@@ -59,107 +60,11 @@ Resources:
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '0B::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-public-C
-  SubnetAppA:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 0, !GetAZs '' ]
-      CidrBlock: 10.125.48.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
           - SubnetPart: '02::/64'
             VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
       Tags:
         - Key: Name
-          Value: sn-app-A
-  SubnetAppB:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 1, !GetAZs '' ]
-      CidrBlock: 10.125.64.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '06::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-app-B
-  SubnetAppC:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 2, !GetAZs '' ]
-      CidrBlock: 10.125.80.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '0A::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-app-C
-  SubnetDbA:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 0, !GetAZs '' ]
-      CidrBlock: 10.125.96.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '01::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-db-A
-  SubnetDbB:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 1, !GetAZs '' ]
-      CidrBlock: 10.125.112.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '05::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-db-B
-  SubnetDbC:
-    Type: AWS::EC2::Subnet
-    DependsOn: IPv6CidrBlock
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 2, !GetAZs '' ]
-      CidrBlock: 10.125.128.0/20
-      AssignIpv6AddressOnCreation: true
-      Ipv6CidrBlock: 
-        Fn::Sub:
-          - "${VpcPart}${SubnetPart}"
-          - SubnetPart: '09::/64'
-            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks ]]]
-      Tags:
-        - Key: Name
-          Value: sn-db-C
+          Value: sn-public-C
   IPv6CidrBlock:
     Type: AWS::EC2::VPCCidrBlock
     Properties:
@@ -316,11 +221,62 @@ Resources:
       Description: "Wordpress Endpoint Name"
       Type: String
       Value: "localhost"
-# Refer to the .md file for this stage on how to create SecureString parameters.
+  ## Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server running everything
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: wordpress-sg
+      GroupDescription: "Restricted access to Wordpress instances"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 ingress"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "access-ssm-key"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AccessSSMkey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+
   WordpressEC2:
     Type: AWS::EC2::Instance
+    DependsOn:
+      - DBName
+      - DBUser    
+      - DBEndpoint
     CreationPolicy:
       ResourceSignal:
         Timeout: PT10M
@@ -367,6 +323,7 @@ Resources:
           sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
           sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
           sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
+          sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
           # Step 8 - Fix the permissions
           usermod -a -G apache ec2-user   
           chown -R ec2-user:apache /var/www
@@ -382,50 +339,4 @@ Resources:
           sudo rm /tmp/db.setup          
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupDescription: Restricted access to Wordpress instances
-      SecurityGroupIngress: 
-        - Description: 'Allow HTTP IPv4 ingress'
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: "access-ssm-key"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: AccessSSMkey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource:
-                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-
-# WordpressEC2 can be improved further with cfn-init & cfn-hup within this stage
+  #WordpressEC2 can be improved further with cfn scripts within this stage
