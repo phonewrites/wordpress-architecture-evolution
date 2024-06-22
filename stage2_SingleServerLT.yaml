@@ -221,7 +221,7 @@ Resources:
       Description: "Wordpress Endpoint Name"
       Type: String
       Value: "localhost"
-# Refer to the .md file for this stage on how to create SecureString parameters.
+  ## Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server launched from an EC2 Launch Template
   SGWordpress:

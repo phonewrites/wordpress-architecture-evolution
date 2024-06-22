@@ -5,4 +5,5 @@
 2. Later in UserData bootstrap script, we can import the above values by using the get-parameters subcommand & --with-decryption flag for SecureString type parameters.
 
 3. Later in the RDS DB Instance resource properties, we can use the dynamic references to use the SecureString parameter values.
+
 Reference: https://aws.amazon.com/blogs/mt/using-aws-systems-manager-parameter-store-secure-string-parameters-in-aws-cloudformation-templates/
