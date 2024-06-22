@@ -263,7 +263,7 @@ Resources:
       Description: "Wordpress Database User"
       Type: String
       Value: "wordpressuser"
-  #The DBEndpoint parameter is changed to the RDS endpoint instead of the EC2
+  # The DBEndpoint parameter is changed to the RDS endpoint instead of the EC2
   DBEndpoint:
     Type: AWS::SSM::Parameter
     Properties:
@@ -271,6 +271,7 @@ Resources:
       Description: "Wordpress Endpoint Name"
       Type: String
       Value: !GetAtt RDSinstance.Endpoint.Address
+  ## Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server launched from an EC2 Launch Template 
   SGWordpress:
