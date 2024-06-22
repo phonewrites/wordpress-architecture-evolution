@@ -272,7 +272,7 @@ Resources:
       Type: String
       Value: !GetAtt RDSinstance.Endpoint.Address
 
-# Single Server launched from an EC2 Launch Template
+# Single Server launched from an EC2 Launch Template 
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -332,7 +332,7 @@ Resources:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-
+# Launch template is modified to run app only without local database
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -341,7 +341,7 @@ Resources:
       - DBEndpoint
     Properties:
       LaunchTemplateName: "Wordpress"
-      VersionDescription: "Deploys instance with app & database"
+      VersionDescription: "Launches instance with app only"
       LaunchTemplateData: 
         ImageId: !Ref LatestAmiId
         InstanceType: t2.micro
@@ -400,6 +400,7 @@ Resources:
         - Key: Name
           Value: Wordpress-LT-Db-Split
 
+# RDS resources needed to split Database from WordpressEC2
   RDSSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -434,5 +435,4 @@ Resources:
       #This param is mandatory for MySQL engine
       #known as "Initial database name" in console-ui
       DBName: !GetAtt DBName.Value
-
-# RDSinstance can be improved further with RDS proxy within this stage
+  #RDSinstance can be improved further with RDS proxy within this stage
