@@ -332,7 +332,7 @@ Resources:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-# Launch template is modified to run app only without local database
+# Launch template is modified to run app only, without local database
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -388,7 +388,6 @@ Resources:
             chmod 2775 /var/www
             find /var/www -type d -exec chmod 2775 {} \;
             find /var/www -type f -exec chmod 0664 {} \;
-  
   WordpressEC2:
     Type: AWS::EC2::Instance
     Properties:

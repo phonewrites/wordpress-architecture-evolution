@@ -337,7 +337,6 @@ Resources:
             echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
             mysql -u root --password=$DBRootPassword < /tmp/db.setup
             sudo rm /tmp/db.setup
-  
   WordpressEC2:
     Type: AWS::EC2::Instance
     Properties:
