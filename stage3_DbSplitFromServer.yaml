@@ -248,6 +248,22 @@ Resources:
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
 
+# Parameters for storing all the important config items
+  DBName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/Wordpress/DBName"
+      Description: "Wordpress Database Name"
+      Type: String
+      Value: "wordpressdb"
+  DBUser:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/Wordpress/DBUser"
+      Description: "Wordpress Database User"
+      Type: String
+      Value: "wordpressuser"
+  #The DBEndpoint parameter is changed to the RDS endpoint instead of the EC2
   DBEndpoint:
     Type: AWS::SSM::Parameter
     Properties:
@@ -320,6 +336,8 @@ Resources:
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
+      - DBName
+      - DBUser    
       - DBEndpoint
     Properties:
       LaunchTemplateName: "Wordpress"
@@ -351,21 +369,20 @@ Resources:
             # Step 4 - Web and DB Servers Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
-            # Step 5 - Set MariaDB Root Password
-            # Step 6 - Download & install Wordpress
+            # Step 5 - Download & install Wordpress
             wget http://wordpress.org/latest.tar.gz -P /var/www/html
             cd /var/www/html
             tar -zxvf latest.tar.gz
             cp -rvf wordpress/* .
             sudo rm -R wordpress
             sudo rm latest.tar.gz
-            # Step 7 - Configure Wordpress
+            # Step 6 - Configure Wordpress
             sudo cp ./wp-config-sample.php ./wp-config.php
             sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
             sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
-            # Step 8 - Fix the permissions
+            # Step 7 - Fix the permissions
             usermod -a -G apache ec2-user   
             chown -R ec2-user:apache /var/www
             chmod 2775 /var/www
@@ -381,7 +398,7 @@ Resources:
         Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
       Tags:
         - Key: Name
-          Value: Wordpress-LT-built
+          Value: Wordpress-LT-Db-Split
 
   RDSSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -402,9 +419,9 @@ Resources:
       Engine: mysql
       EngineVersion: 8.0.32
       MultiAZ: false
-      DBInstanceIdentifier: "{{resolve:ssm:/Wordpress/DBName:1:1718558224308}}"
-      MasterUsername: "{{resolve:ssm:/Wordpress/DBUser:1:1718558250608}}"
-      MasterUserPassword: "{{resolve:ssm-secure:/Wordpress/DBPassword:1:1718557697915}}"
+      DBInstanceIdentifier: !GetAtt DBName.Value
+      MasterUsername: !GetAtt DBUser.Value
+      MasterUserPassword: "{{resolve:ssm-secure:/Wordpress/DBPassword}}"
       DBInstanceClass: "db.t3.micro"
       # StorageType: gp2
       AllocatedStorage: 20
@@ -416,6 +433,6 @@ Resources:
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
       #This param is mandatory for MySQL engine
       #known as "Initial database name" in console-ui
-      DBName: "{{resolve:ssm:/Wordpress/DBName:1:1718558224308}}"
+      DBName: !GetAtt DBName.Value
 
 # RDSinstance can be improved further with RDS proxy within this stage

@@ -341,11 +341,7 @@ Resources:
   WordpressEC2:
     Type: AWS::EC2::Instance
     Properties:
-      # InstanceType: t2.micro
-      # ImageId: !Ref LatestAmiId
       SubnetId: !Ref SubnetPublicA
-      # SecurityGroupIds: 
-      #   - !Ref SGWordpress
       LaunchTemplate:
         LaunchTemplateId: !Ref WordpressLaunchTemplate
         Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
