@@ -273,6 +273,10 @@ Resources:
 
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
+    DependsOn:
+      - DBName
+      - DBUser    
+      - DBEndpoint    
     Properties:
       LaunchTemplateName: "Wordpress"
       VersionDescription: "Deploys instance with app & database"

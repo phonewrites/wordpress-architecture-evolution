@@ -415,7 +415,7 @@ Resources:
         - !Ref SGDatabase
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
       #This param is mandatory for MySQL engine
-      #"Initial database name" in console-ui
+      #known as "Initial database name" in console-ui
       DBName: "{{resolve:ssm:/Wordpress/DBName:1:1718558224308}}"
 
 # RDSinstance can be improved further with RDS proxy within this stage
