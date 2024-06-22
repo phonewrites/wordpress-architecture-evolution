@@ -347,3 +347,4 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-LT-built
+  #WordpressEC2 can be improved further with cfn scripts within this stage
