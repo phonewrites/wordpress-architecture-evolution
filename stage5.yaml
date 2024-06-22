@@ -328,14 +328,14 @@ Resources:
       Description: "File System ID of the EFS resource for storing Wordpress content"
       Type: String
       Value: !GetAtt WordpressEFS.FileSystemId
-  # The ALBDNSNAME parameter is used to connect the EFS to the EC2 
+  # The ALBDNSName parameter is used to connect the EFS to the EC2 
   ALBDNSName:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: "/Wordpress/ALBDNSName"
+      Name: "/Wordpress/ALBDNSName" 
       Description: "DNS Name of the wordpress-alb"
       Type: String
-      Value: !GetAtt WordpressALB.DNSName  
+      Value: !GetAtt WordpressALB.DNSName
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server launched from an EC2 Launch Template
@@ -424,77 +424,94 @@ Resources:
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
 # Launch template is modified to run app only & use EFS for content
-  WordpressLaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    DependsOn:
-      - DBName
-      - DBUser    
-      - DBEndpoint
-      - EFSfsid
-    Properties:
-      LaunchTemplateName: "Wordpress"
-      VersionDescription: "Launches instance with app only. Uses EFS for content"
-      LaunchTemplateData: 
-        ImageId: !Ref LatestAmiId
-        InstanceType: t2.micro
-        SecurityGroupIds:
-          - !GetAtt SGWordpress.GroupId
-        IamInstanceProfile:
-          Arn: !GetAtt WordpressInstanceProfile.Arn          
-        DisableApiTermination: true
-        CreditSpecification:
-          CpuCredits: Standard
-        UserData:
-          Fn::Base64: !Sub |
-            #!/bin/bash -xe
-            # Step 1 - Import parameter store values
-            DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-            DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-            DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            EFSfsid=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/EFSfsid --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            # Step 2 - System Updates
-            dnf -y update
-            dnf -y upgrade
-            # Step 3 - Install system software - including Web and DB
-            dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress amazon-efs-utils -y
-            # Step 4 - Bring web servers online & set to startup
-            systemctl enable httpd
-            systemctl start httpd
-            # Step 5 - Configure EFS to mount as the Wordpress content directory
-            mkdir -p /var/www/html/wp-content
-            echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
-            mount -a -t efs defaults
-            # Step 6 - Download & install Wordpress
-            wget http://wordpress.org/latest.tar.gz -P /var/www/html
-            cd /var/www/html
-            tar -zxvf latest.tar.gz
-            cp -rvf wordpress/* .
-            sudo rm -R wordpress
-            sudo rm latest.tar.gz
-            # Step 7 - Configure Wordpress
-            sudo cp ./wp-config-sample.php ./wp-config.php
-            sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
-            sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
-            sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
-            sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
-            # Step 8 - Fix the permissions
-            usermod -a -G apache ec2-user   
-            chown -R ec2-user:apache /var/www
-            chmod 2775 /var/www
-            find /var/www -type d -exec chmod 2775 {} \;
-            find /var/www -type f -exec chmod 0664 {} \;
-  WordpressEC2:
-    Type: AWS::EC2::Instance
-    Properties:
-      SubnetId: !Ref SubnetPublicA
-      LaunchTemplate:
-        LaunchTemplateId: !Ref WordpressLaunchTemplate
-        Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
-      Tags:
-        - Key: Name
-          Value: Wordpress-LT-Fs-Split
+  # WordpressLaunchTemplate:
+  #   Type: AWS::EC2::LaunchTemplate
+  #   DependsOn:
+  #     - DBName
+  #     - DBUser    
+  #     - DBEndpoint
+  #     - EFSfsid
+  #     - ALBDNSName
+  #   Properties:
+  #     LaunchTemplateName: "Wordpress"
+  #     VersionDescription: "Launches app only. Uses EFS for content. ALB home added to WP Database."
+  #     LaunchTemplateData: 
+  #       ImageId: !Ref LatestAmiId
+  #       InstanceType: t2.micro
+  #       SecurityGroupIds:
+  #         - !GetAtt SGWordpress.GroupId
+  #       IamInstanceProfile:
+  #         Arn: !GetAtt WordpressInstanceProfile.Arn
+  #       DisableApiTermination: true
+  #       CreditSpecification:
+  #         CpuCredits: Standard
+  #       UserData:
+  #         Fn::Base64: !Sub |
+  #           #!/bin/bash -xe
+  #           # Step 1 - Import parameter store values
+  #           DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+  #           DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+  #           DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
+  #           DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
+  #           DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+  #           EFSfsid=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/EFSfsid --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+  #           ALBDNSName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/ALBDNSName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+  #           # Step 2 - System Updates
+  #           dnf -y update
+  #           dnf -y upgrade
+  #           # Step 3 - Install system software - including Web and DB
+  #           dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress amazon-efs-utils -y
+  #           # Step 4 - Bring web servers online & set to startup
+  #           systemctl enable httpd
+  #           systemctl start httpd
+  #           # Step 5 - Configure EFS to mount as the Wordpress content directory
+  #           mkdir -p /var/www/html/wp-content
+  #           echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
+  #           mount -a -t efs defaults
+  #           # Step 6 - Download & install Wordpress
+  #           wget http://wordpress.org/latest.tar.gz -P /var/www/html
+  #           cd /var/www/html
+  #           tar -zxvf latest.tar.gz
+  #           cp -rvf wordpress/* .
+  #           sudo rm -R wordpress
+  #           sudo rm latest.tar.gz
+  #           # Step 7 - Configure Wordpress
+  #           sudo cp ./wp-config-sample.php ./wp-config.php
+  #           sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
+  #           sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
+  #           sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
+  #           sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
+  #           # Step 8 - Fix the permissions
+  #           usermod -a -G apache ec2-user   
+  #           chown -R ec2-user:apache /var/www
+  #           chmod 2775 /var/www
+  #           find /var/www -type d -exec chmod 2775 {} \;
+  #           find /var/www -type f -exec chmod 0664 {} \;
+  #           # Step 9 - Nested script to point Wordpress app's home to the DNS name of wordpress-alb
+  #           cat >> /home/ec2-user/ip-update.sh<< 'EOF'
+  #           #!/bin/bash
+  #           source <(php -r 'require("/var/www/html/wp-config.php"); echo("DB_NAME=".DB_NAME."; DB_USER=".DB_USER."; DB_PASSWORD=".DB_PASSWORD."; DB_HOST=".DB_HOST); ')
+  #           SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p $DB_PASSWORD $DB_NAME -e"
+  #           OLD_URL=$(mysql -u $DB_USER -h $DB_HOST -p $DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
+  #           ALBDNSName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/ALBDNSName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+  #           $SQL_COMMAND "UPDATE wp_options SET option_value = replace(option_value, '$OLD_URL', 'http://$ALBDNSName') WHERE option_name = 'home' OR option_name = 'siteurl';"
+  #           $SQL_COMMAND "UPDATE wp_posts SET guid = replace(guid, '$OLD_URL','http://$ALBDNSName');"
+  #           $SQL_COMMAND "UPDATE wp_posts SET post_content = replace(post_content, '$OLD_URL', 'http://$ALBDNSName');"
+  #           $SQL_COMMAND "UPDATE wp_postmeta SET meta_value = replace(meta_value,'$OLD_URL','http://$ALBDNSName');"
+  #           EOF
+  #           chmod 755 /home/ec2-user/ip-update.sh
+  #           echo "/home/ec2-user/ip-update.sh" >> /etc/rc.local
+  #           /home/ec2-user/ip-update.sh
+  # WordpressEC2:
+  #   Type: AWS::EC2::Instance
+  #   Properties:
+  #     SubnetId: !Ref SubnetPublicA
+  #     LaunchTemplate:
+  #       LaunchTemplateId: !Ref WordpressLaunchTemplate
+  #       Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
+  #     Tags:
+  #       - Key: Name
+  #         Value: Wordpress-LT-Fs-Split
   #WordpressEC2 can be improved further with cfn scripts within this stage
 
 # RDS resources needed to split Database from the WordpressEC2 instance
@@ -574,19 +591,51 @@ Resources:
       SecurityGroups: 
         - !Ref SGALB
 
+  # ALBTargetGroup:
+  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  #   Properties:
+  #     Name: wordpress-alb-tg
+  #     TargetType: instance
+  #     Protocol: HTTP
+  #     Port: 80
+  #     VpcId: String
+  #     ProtocolVersion:  HTTP1
+  #     # HealthCheckEnabled: true
+  #     # HealthCheckPath: '/'
+  #     HealthCheckPort: String
+  #     # HealthCheckProtocol: HTTP
 
-  ALBTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: wordpress-alb-tg
-      TargetType: instance
-      Protocol: HTTP
-      Port: 80
-      VpcId: String
-      ProtocolVersion:  HTTP1
-      # HealthCheckEnabled: true
-      # HealthCheckPath: '/'
-      HealthCheckPort: String
-      # HealthCheckProtocol: HTTP
+  # WordpressASG:
+  #   Type: AWS::AutoScaling::AutoScalingGroup
+  #   DependsOn: InternetGatewayAttachment
+  #   Properties:
+  #     AutoScalingGroupName: wordpress-asg
+  #     LaunchTemplate:
+  #         LaunchTemplateId: !Ref WordpressLaunchTemplate
+  #         Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
+  #     VPCZoneIdentifier: [!Ref SubnetPublicA,!Ref SubnetPublicB,!Ref SubnetPublicC]
+  #     TargetGroupARNs: [!Ref ALBTargetGroup]
+  #     HealthCheckType: 'EC2, ELB'
+  #     # HealthCheckType: ELB
+  #     MetricsCollection: 
+  #     DesiredCapacity: 1
+  #     MinSize: 1
+  #     MaxSize: 3
+  #     # NewInstancesProtectedFromScaleIn: false
+  #     Tags:
+  #       - Key: Name
+  #         Value: Wordpress-LT-ASG
 
+  # WpHighCPUScaleOut:
+  #     Type: AWS::AutoScaling::ScalingPolicy
+  #     Properties:
+  #       AutoScalingGroupName: !Ref WordpressASG
+  #       # PolicyType: SimpleScaling
+  #     AdjustmentType: ChangeInCapacity
+  #     ScalingAdjustment: '1'
 
+  # WpLowCPUScaleIn:
+  #     Type: AWS::AutoScaling::ScalingPolicy
+  #     Properties:
+  #       AutoScalingGroupName: !Ref WordpressASG
+  #       # PolicyType: SimpleScaling
