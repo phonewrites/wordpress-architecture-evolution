@@ -443,7 +443,6 @@ Resources:
             systemctl start httpd
             # Step 5 - Configure EFS to mount as the Wordpress content directory
             mkdir -p /var/www/html/wp-content
-            chown -R ec2-user:apache /var/www/
             echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
             mount -a -t efs defaults
             # Step 6 - Download & install Wordpress
