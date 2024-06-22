@@ -279,7 +279,7 @@ Resources:
       - DBEndpoint    
     Properties:
       LaunchTemplateName: "Wordpress"
-      VersionDescription: "Deploys instance with app & database"
+      VersionDescription: "Launches instance with app & database"
       LaunchTemplateData: 
         ImageId: !Ref LatestAmiId
         InstanceType: t2.micro
