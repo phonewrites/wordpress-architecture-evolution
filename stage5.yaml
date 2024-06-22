@@ -328,6 +328,14 @@ Resources:
       Description: "File System ID of the EFS resource for storing Wordpress content"
       Type: String
       Value: !GetAtt WordpressEFS.FileSystemId
+  # The ALBDNSNAME parameter is used to connect the EFS to the EC2 
+  ALBDNSName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/Wordpress/ALBDNSName"
+      Description: "DNS Name of the wordpress-alb"
+      Type: String
+      Value: !GetAtt WordpressALB.DNSName  
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server launched from an EC2 Launch Template
@@ -367,6 +375,18 @@ Resources:
           FromPort: '2049'
           ToPort: '2049'
           SourceSecurityGroupId: !Ref SGWordpress
+  SGALB:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: alb-sg
+      GroupDescription: "Controlled access to ALB"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 ingress"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'
 
   WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
@@ -539,5 +559,34 @@ Resources:
               !Sub 'SubnetApp${zone}'
           SecurityGroups:
             - !GetAtt SGEFS.GroupId
+
+# # Resources needed for load balancing and scaling
+  WordpressALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: "wordpress-alb"
+      # Scheme: internet-facing
+      # IpAddressType: ipv4
+      Subnets: 
+        - !Ref SubnetPublicA
+        - !Ref SubnetPublicB
+        - !Ref SubnetPublicC
+      SecurityGroups: 
+        - !Ref SGALB
+
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: wordpress-alb-tg
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      VpcId: String
+      ProtocolVersion:  HTTP1
+      # HealthCheckEnabled: true
+      # HealthCheckPath: '/'
+      HealthCheckPort: String
+      # HealthCheckProtocol: HTTP
 
 
