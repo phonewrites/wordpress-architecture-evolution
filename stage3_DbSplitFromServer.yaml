@@ -399,6 +399,7 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-LT-Db-Split
+  #WordpressEC2 can be improved further with cfn scripts within this stage
 
 # RDS resources needed to split Database from WordpressEC2
   RDSSubnetGroup:

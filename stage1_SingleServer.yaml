@@ -339,5 +339,4 @@ Resources:
           sudo rm /tmp/db.setup          
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
-
-# WordpressEC2 can be improved further with cfn-init & cfn-hup within this stage
+  #WordpressEC2 can be improved further with cfn scripts within this stage
