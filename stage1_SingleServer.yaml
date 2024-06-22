@@ -273,6 +273,10 @@ Resources:
 
   WordpressEC2:
     Type: AWS::EC2::Instance
+    DependsOn:
+      - DBName
+      - DBUser    
+      - DBEndpoint
     CreationPolicy:
       ResourceSignal:
         Timeout: PT10M
