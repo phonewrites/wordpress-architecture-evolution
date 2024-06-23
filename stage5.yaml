@@ -442,7 +442,8 @@ Resources:
   #         - !GetAtt SGWordpress.GroupId
   #       IamInstanceProfile:
   #         Arn: !GetAtt WordpressInstanceProfile.Arn
-  #       DisableApiTermination: true
+  #       #Allow instance termination for testing 
+  #       DisableApiTermination: false
   #       CreditSpecification:
   #         CpuCredits: Standard
   #       UserData:
@@ -582,6 +583,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: "wordpress-alb"
+      # Type: application
       # Scheme: internet-facing
       # IpAddressType: ipv4
       Subnets: 
@@ -590,20 +592,27 @@ Resources:
         - !Ref SubnetPublicC
       SecurityGroups: 
         - !Ref SGALB
-
-  # ALBTargetGroup:
-  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
-  #   Properties:
-  #     Name: wordpress-alb-tg
-  #     TargetType: instance
-  #     Protocol: HTTP
-  #     Port: 80
-  #     VpcId: String
-  #     ProtocolVersion:  HTTP1
-  #     # HealthCheckEnabled: true
-  #     # HealthCheckPath: '/'
-  #     HealthCheckPort: String
-  #     # HealthCheckProtocol: HTTP
+  WordpressALBHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WordpressALB
+      Protocol: HTTP
+      Port: 80
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: wordpress-alb-tg
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref VPC
+      # HealthCheckEnabled: true
+      # HealthCheckProtocol: HTTP
+      # HealthCheckPath: '/'
+      ProtocolVersion:  HTTP1
 
   # WordpressASG:
   #   Type: AWS::AutoScaling::AutoScalingGroup
