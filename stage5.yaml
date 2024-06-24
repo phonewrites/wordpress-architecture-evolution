@@ -603,7 +603,7 @@ Resources:
       # HealthCheckPath: '/'
       ProtocolVersion:  HTTP1
 
-# Resources needed for scaling the Wordpress app EC2 instances
+# Resources needed for auto-scaling the Wordpress app EC2 instances
   WordpressASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: InternetGatewayAttachment
@@ -625,14 +625,61 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-LT-ASG
-          PropagateAtLaunch: true  
-  # WpHighCPUScaleOut:
-  #     Type: AWS::AutoScaling::ScalingPolicy
-  #     Properties:
-  #       AutoScalingGroupName: !Ref WordpressASG
-  #       # PolicyType: SimpleScaling
-  #     AdjustmentType: ChangeInCapacity
-  #     ScalingAdjustment: '1'
+          PropagateAtLaunch: true
+
+
+
+  WpHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "Avg. CPU over 40 %" 
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/EC2'
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WordpressASG      
+      Statistic: 'Average'
+      Period: 300
+      Threshold: 40      
+      ComparisonOperator: GreaterThanThreshold
+      # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      EvaluationPeriods: 1
+      AlarmDescription: "Scale out if CPU is greater than 40% for 5 minutes."
+
+  WpLowCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "Avg. CPU under 40 %" 
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/EC2'
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WordpressASG      
+      Statistic: 'Average'
+      Period: 300
+      Threshold: 40      
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      AlarmDescription: "Scale in if CPU is less than 40% for 5 minutes."
+
+
+      # ActionsEnabled: Boolean
+      # AlarmActions: 
+      #   - String
+      # AlarmDescription: String
+      # DatapointsToAlarm: Integer
+
+      # EvaluateLowSampleCountPercentile: String
+      # InsufficientDataActions: 
+      #   - String
+      # OKActions: 
+      #   - String
+      # Tags: 
+      #   - Tag
+      # ThresholdMetricId: String
+      # TreatMissingData: String
+      # Unit: String
+
 
   # WpLowCPUScaleIn:
   #     Type: AWS::AutoScaling::ScalingPolicy
