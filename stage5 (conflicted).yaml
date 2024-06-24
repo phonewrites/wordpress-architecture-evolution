@@ -630,7 +630,7 @@ Resources:
     #WordpressASG can be improved further with cfn scripts within this stage.
     #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-ec2-auto-scaling.html#scenario-as-updatepolicy
 
-  # Scaling-out
+  Scaling-out 
   WpHighCpuScaleOut:
     Type: AWS::AutoScaling::ScalingPolicy
     Properties:
@@ -656,7 +656,7 @@ Resources:
       EvaluationPeriods: 1
       AlarmDescription: "Scale out if CPU is greater than 40% for 5 minutes."
       AlarmActions: [!Ref WpHighCpuScaleOut ]
-  # Scaling-in
+
   WpLowCPUScaleIn:
     Type: AWS::AutoScaling::ScalingPolicy
     Properties:
@@ -681,3 +681,23 @@ Resources:
       EvaluationPeriods: 1
       AlarmDescription: "Scale in if CPU is less than 40% for 5 minutes."
       AlarmActions: [!Ref WpLowCPUScaleIn ]
+
+
+      # ActionsEnabled: Boolean
+      # AlarmActions: 
+      #   - String
+      # AlarmDescription: String
+      # DatapointsToAlarm: Integer
+
+      # EvaluateLowSampleCountPercentile: String
+      # InsufficientDataActions: 
+      #   - String
+      # OKActions: 
+      #   - String
+      # Tags: 
+      #   - Tag
+      # ThresholdMetricId: String
+      # TreatMissingData: String
+      # Unit: String
+
+
