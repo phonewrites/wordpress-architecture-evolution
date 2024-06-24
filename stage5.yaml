@@ -503,17 +503,6 @@ Resources:
             chmod 755 /home/ec2-user/ip-update.sh
             echo "/home/ec2-user/ip-update.sh" >> /etc/rc.local
             /home/ec2-user/ip-update.sh
-  # WordpressEC2:
-  #   Type: AWS::EC2::Instance
-  #   Properties:
-  #     SubnetId: !Ref SubnetPublicA
-  #     LaunchTemplate:
-  #       LaunchTemplateId: !Ref WordpressLaunchTemplate
-  #       Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
-  #     Tags:
-  #       - Key: Name
-  #         Value: Wordpress-LT-Fs-Split
-  #WordpressEC2 can be improved further with cfn scripts within this stage
 
 # RDS resources needed to split Database from the WordpressEC2 instance
   RDSSubnetGroup:
@@ -578,7 +567,7 @@ Resources:
           SecurityGroups:
             - !GetAtt SGEFS.GroupId
 
-# # Resources needed for load balancing and scaling
+# Resources needed for load balancing
   WordpressALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -614,29 +603,29 @@ Resources:
       # HealthCheckPath: '/'
       ProtocolVersion:  HTTP1
 
-### TEST IN CONSOLE TO COMPARE CREATION OF ALBTargetGroup & WordpressALBHttpListener
-
-  # WordpressASG:
-  #   Type: AWS::AutoScaling::AutoScalingGroup
-  #   DependsOn: InternetGatewayAttachment
-  #   Properties:
-  #     AutoScalingGroupName: wordpress-asg
-  #     LaunchTemplate:
-  #         LaunchTemplateId: !Ref WordpressLaunchTemplate
-  #         Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
-  #     VPCZoneIdentifier: [!Ref SubnetPublicA,!Ref SubnetPublicB,!Ref SubnetPublicC]
-  #     TargetGroupARNs: [!Ref ALBTargetGroup]
-  #     HealthCheckType: 'EC2, ELB'
-  #     # HealthCheckType: ELB
-  #     MetricsCollection: 
-  #     DesiredCapacity: 1
-  #     MinSize: 1
-  #     MaxSize: 3
-  #     # NewInstancesProtectedFromScaleIn: false
-  #     Tags:
-  #       - Key: Name
-  #         Value: Wordpress-LT-ASG
-
+# Resources needed for scaling the Wordpress app EC2 instances
+  WordpressASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      AutoScalingGroupName: wordpress-asg
+      LaunchTemplate:
+          LaunchTemplateId: !Ref WordpressLaunchTemplate
+          Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier: [!Ref SubnetPublicA,!Ref SubnetPublicB,!Ref SubnetPublicC]
+      TargetGroupARNs: [!Ref ALBTargetGroup]
+      # HealthCheckType: 'EC2, ELB'
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      MetricsCollection: [Granularity: 1Minute]
+      DesiredCapacity: 1
+      MinSize: 1
+      MaxSize: 1
+      # NewInstancesProtectedFromScaleIn: false
+      Tags:
+        - Key: Name
+          Value: Wordpress-LT-ASG
+          PropagateAtLaunch: true  
   # WpHighCPUScaleOut:
   #     Type: AWS::AutoScaling::ScalingPolicy
   #     Properties:
