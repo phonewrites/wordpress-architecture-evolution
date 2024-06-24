@@ -1,14 +1,15 @@
 # Refer to the .md file for this stage on how to create the other pre-requisite parameters.
 AWSTemplateFormatVersion: 2010-09-09
 Transform: 'AWS::LanguageExtensions'
-Description:  Wordpress app AWS architecture evolution - Stage 4
+Description:  Wordpress app AWS architecture evolution - Stage 5
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
 Resources:
-# Network skeleton with App subnets added for this stage of the project
+
+# Network skeleton with all 3 tiers of subnets
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -327,6 +328,14 @@ Resources:
       Description: "File System ID of the EFS resource for storing Wordpress content"
       Type: String
       Value: !GetAtt WordpressEFS.FileSystemId
+  # The ALBDNSName parameter is used to connect the EFS to the EC2 
+  ALBDNSName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/Wordpress/ALBDNSName" 
+      Description: "DNS Name of the wordpress-alb"
+      Type: String
+      Value: !GetAtt WordpressALB.DNSName
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
 # Single Server launched from an EC2 Launch Template
@@ -366,6 +375,18 @@ Resources:
           FromPort: '2049'
           ToPort: '2049'
           SourceSecurityGroupId: !Ref SGWordpress
+  SGALB:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: alb-sg
+      GroupDescription: "Controlled access to ALB"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 ingress"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'
 
   WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
@@ -402,7 +423,7 @@ Resources:
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
-# Launch template modified to run app only & use EFS for content
+# Launch template modified to run app only, use EFS for content & point to ALB DNS name
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -410,17 +431,19 @@ Resources:
       - DBUser    
       - DBEndpoint
       - EFSfsid
+      - ALBDNSName
     Properties:
       LaunchTemplateName: "Wordpress"
-      VersionDescription: "Launches instance with app only. Uses EFS for content"
+      VersionDescription: "Launches app only. Uses EFS for content. ALB home added to WP Database."
       LaunchTemplateData: 
         ImageId: !Ref LatestAmiId
         InstanceType: t2.micro
         SecurityGroupIds:
           - !GetAtt SGWordpress.GroupId
         IamInstanceProfile:
-          Arn: !GetAtt WordpressInstanceProfile.Arn          
-        DisableApiTermination: true
+          Arn: !GetAtt WordpressInstanceProfile.Arn
+        #Allow instance termination for testing 
+        DisableApiTermination: false
         CreditSpecification:
           CpuCredits: Standard
         UserData:
@@ -433,6 +456,7 @@ Resources:
             DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
             DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
             EFSfsid=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/EFSfsid --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+            ALBDNSName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/ALBDNSName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
             # Step 2 - System Updates
             dnf -y update
             dnf -y upgrade
@@ -464,17 +488,21 @@ Resources:
             chmod 2775 /var/www
             find /var/www -type d -exec chmod 2775 {} \;
             find /var/www -type f -exec chmod 0664 {} \;
-  WordpressEC2:
-    Type: AWS::EC2::Instance
-    Properties:
-      SubnetId: !Ref SubnetPublicA
-      LaunchTemplate:
-        LaunchTemplateId: !Ref WordpressLaunchTemplate
-        Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
-      Tags:
-        - Key: Name
-          Value: Wordpress-LT-Fs-Split
-  #WordpressEC2 can be improved further with cfn scripts within this stage
+            # Step 9 - Nested script to point Wordpress app's home to the DNS name of wordpress-alb
+            cat >> /home/ec2-user/ip-update.sh<< 'EOF'
+            #!/bin/bash
+            source <(php -r 'require("/var/www/html/wp-config.php"); echo("DB_NAME=".DB_NAME."; DB_USER=".DB_USER."; DB_PASSWORD=".DB_PASSWORD."; DB_HOST=".DB_HOST); ')
+            SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p $DB_PASSWORD $DB_NAME -e"
+            OLD_URL=$(mysql -u $DB_USER -h $DB_HOST -p $DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
+            ALBDNSName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/ALBDNSName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+            $SQL_COMMAND "UPDATE wp_options SET option_value = replace(option_value, '$OLD_URL', 'http://$ALBDNSName') WHERE option_name = 'home' OR option_name = 'siteurl';"
+            $SQL_COMMAND "UPDATE wp_posts SET guid = replace(guid, '$OLD_URL','http://$ALBDNSName');"
+            $SQL_COMMAND "UPDATE wp_posts SET post_content = replace(post_content, '$OLD_URL', 'http://$ALBDNSName');"
+            $SQL_COMMAND "UPDATE wp_postmeta SET meta_value = replace(meta_value,'$OLD_URL','http://$ALBDNSName');"
+            EOF
+            chmod 755 /home/ec2-user/ip-update.sh
+            echo "/home/ec2-user/ip-update.sh" >> /etc/rc.local
+            /home/ec2-user/ip-update.sh
 
 # RDS resources needed to split Database from the WordpressEC2 instance
   RDSSubnetGroup:
@@ -538,5 +566,138 @@ Resources:
               !Sub 'SubnetApp${zone}'
           SecurityGroups:
             - !GetAtt SGEFS.GroupId
+
+# Resources needed for load balancing
+  WordpressALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: "wordpress-alb"
+      # Type: application
+      # Scheme: internet-facing
+      # IpAddressType: ipv4
+      Subnets: 
+        - !Ref SubnetPublicA
+        - !Ref SubnetPublicB
+        - !Ref SubnetPublicC
+      SecurityGroups: 
+        - !Ref SGALB
+  WordpressALBHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WordpressALB
+      Protocol: HTTP
+      Port: 80
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: wordpress-alb-tg
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref VPC
+      # HealthCheckEnabled: true
+      # HealthCheckProtocol: HTTP
+      # HealthCheckPath: '/'
+      ProtocolVersion:  HTTP1
+
+# Resources needed for auto-scaling the Wordpress app EC2 instances
+  WordpressASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      AutoScalingGroupName: wordpress-asg
+      LaunchTemplate:
+          LaunchTemplateId: !Ref WordpressLaunchTemplate
+          Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier: [!Ref SubnetPublicA,!Ref SubnetPublicB,!Ref SubnetPublicC]
+      TargetGroupARNs: [!Ref ALBTargetGroup]
+      # HealthCheckType: 'EC2, ELB'
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      MetricsCollection: [Granularity: 1Minute]
+      DesiredCapacity: 1
+      MinSize: 1
+      ##Set MaxSize: 3 to test
+      MaxSize: 1
+      # NewInstancesProtectedFromScaleIn: false
+      Tags:
+        - Key: Name
+          Value: Wordpress-LT-ASG
+          PropagateAtLaunch: true
+    #WordpressASG can be improved further with cfn scripts within this stage.
+    #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-ec2-auto-scaling.html#scenario-as-updatepolicy
+
+  Scaling-out 
+  WpHighCpuScaleOut:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WordpressASG
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: 1
+      Cooldown: 120
+  WpHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "Avg. CPU over 40 %" 
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/EC2'
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WordpressASG      
+      Statistic: 'Average'
+      Period: 300
+      Threshold: 40
+      ComparisonOperator: GreaterThanThreshold
+      # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      EvaluationPeriods: 1
+      AlarmDescription: "Scale out if CPU is greater than 40% for 5 minutes."
+      AlarmActions: [!Ref WpHighCpuScaleOut ]
+
+  WpLowCPUScaleIn:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WordpressASG
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: -1
+      Cooldown: 120
+  WpLowCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "Avg. CPU under 40 %" 
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/EC2'
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WordpressASG      
+      Statistic: 'Average'
+      Period: 300
+      Threshold: 40      
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      AlarmDescription: "Scale in if CPU is less than 40% for 5 minutes."
+      AlarmActions: [!Ref WpLowCPUScaleIn ]
+
+
+      # ActionsEnabled: Boolean
+      # AlarmActions: 
+      #   - String
+      # AlarmDescription: String
+      # DatapointsToAlarm: Integer
+
+      # EvaluateLowSampleCountPercentile: String
+      # InsufficientDataActions: 
+      #   - String
+      # OKActions: 
+      #   - String
+      # Tags: 
+      #   - Tag
+      # ThresholdMetricId: String
+      # TreatMissingData: String
+      # Unit: String
 
 
