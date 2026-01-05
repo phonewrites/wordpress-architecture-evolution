@@ -254,17 +254,17 @@ Resources:
               - ec2.amazonaws.com
             Action:
               - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: "access-ssm-key"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: AccessSSMkey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource:
-                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
+      # Policies:
+      #   - PolicyName: "access-ssm-key"
+      #     PolicyDocument:
+      #       Version: "2012-10-17"
+      #       Statement:
+      #         - Sid: AccessSSMkey
+      #           Effect: Allow
+      #           Action:
+      #             - kms:Decrypt
+      #           Resource:
+      #             - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
       Path: /
       ManagedPolicyArns: 
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
@@ -347,4 +347,4 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-LT-built
-  #WordpressEC2 can be improved further with cfn scripts within this stage
+  #WordpressEC2 can be improved further with cfn scripts within this stage.
