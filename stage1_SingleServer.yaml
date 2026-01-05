@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description:  Wordpress app AWS architecture evolution - Stage 1
+Description: WordPress application AWS architecture evolution - Stage 1 (Single EC2 instance with direct configuration)
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
@@ -223,7 +223,7 @@ Resources:
       Value: "localhost"
   ## Refer to the .md file for this stage on how to create SecureString parameters.
 
-# Single Server running everything
+# Directly configured standalone single server
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
