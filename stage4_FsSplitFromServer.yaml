@@ -1,12 +1,12 @@
 # Refer to the .md file for this stage on how to create the other pre-requisite parameters.
 AWSTemplateFormatVersion: 2010-09-09
 Transform: 'AWS::LanguageExtensions'
-Description:  Wordpress app AWS architecture evolution - Stage 4
+Description: WordPress application AWS architecture evolution - Stage 4 (Single EC2 instance with separate RDS database & EFS shared storage)
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
 Resources:
 # Network skeleton with App subnets added for this stage of the project
   VPC:
@@ -329,7 +329,7 @@ Resources:
       Value: !GetAtt WordpressEFS.FileSystemId
 # Refer to the .md file for this stage on how to create SecureString parameters.
 
-# Single Server launched from an EC2 Launch Template
+# App-only Single Server (no local DB) with separate RDS database & EFS for shared file storage
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -427,18 +427,17 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
             # Step 1 - Import parameter store values
-            DBName=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBName --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            DBUser=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBUser --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            DBPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-            DBRootPassword=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBRootPassword --with-decryption --query 'Parameters[0].Value'` | sed -e 's/^"//' -e 's/"$//')        
-            DBEndpoint=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/DBEndpoint --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
-            EFSfsid=$(echo `aws ssm get-parameters --region us-east-1 --names /Wordpress/EFSfsid --query Parameters[0].Value` | sed -e 's/^"//' -e 's/"$//')
+            DBName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBName --query Parameters[0].Value --output text)
+            DBUser=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBUser --query Parameters[0].Value --output text)
+            DBPassword=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBPassword --with-decryption --query Parameters[0].Value --output text)
+            DBEndpoint=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBEndpoint --query Parameters[0].Value --output text)
+            EFSfsid=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/EFSfsid --query Parameters[0].Value --output text)
             # Step 2 - System Updates
             dnf -y update
             dnf -y upgrade
-            # Step 3 - Install system software - including Web and DB
-            dnf install wget php-mysqlnd httpd php-fpm php-mysqli mariadb105-server php-json php php-devel stress amazon-efs-utils -y
-            # Step 4 - Bring web servers online & set to startup
+            # Step 3 - Install system software - Web server only (no local database)
+            dnf install wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress amazon-efs-utils -y
+            # Step 4 - Web Server Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
             # Step 5 - Configure EFS to mount as the Wordpress content directory
@@ -446,14 +445,14 @@ Resources:
             echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
             mount -a -t efs defaults
             # Step 6 - Download & install Wordpress
-            wget http://wordpress.org/latest.tar.gz -P /var/www/html
+            wget https://wordpress.org/latest.tar.gz -P /var/www/html
             cd /var/www/html
             tar -zxvf latest.tar.gz
             cp -rvf wordpress/* .
-            sudo rm -R wordpress
-            sudo rm latest.tar.gz
+            rm -R wordpress
+            rm latest.tar.gz
             # Step 7 - Configure Wordpress
-            sudo cp ./wp-config-sample.php ./wp-config.php
+            cp ./wp-config-sample.php ./wp-config.php
             sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
@@ -494,23 +493,24 @@ Resources:
     DeletionPolicy: Delete
     Properties:
       Engine: mysql
-      EngineVersion: 8.0.32
+      #Mandatory MySQL parameter aka "Initial database name" in console
+      DBName: !GetAtt DBName.Value 
+      #Free tier eligible settings
+      EngineVersion: 8.4 #Latest MySQL LTS
+      DBInstanceClass: "db.t3.micro"
+      AllocatedStorage: 20     
+      #Default settings
+      StorageType: gp3
+      # NetworkType: IPV4
+      # PubliclyAccessible: false
       MultiAZ: false
       DBInstanceIdentifier: !GetAtt DBName.Value
       MasterUsername: !GetAtt DBUser.Value
       MasterUserPassword: "{{resolve:ssm-secure:/Wordpress/DBPassword}}"
-      DBInstanceClass: "db.t3.micro"
-      # StorageType: gp2
-      AllocatedStorage: 20
-      # NetworkType: IPV4
       DBSubnetGroupName: !Ref RDSSubnetGroup
-      # PubliclyAccessible: false
       VPCSecurityGroups:
         - !Ref SGDatabase
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
-      #This param is mandatory for MySQL engine
-      #known as "Initial database name" in console-ui
-      DBName: !GetAtt DBName.Value
 
 # EFS resources needed to split Wordpress content from WordpressEC2
   WordpressEFS:
