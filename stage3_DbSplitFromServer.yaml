@@ -423,9 +423,9 @@ Resources:
       #Free tier eligible settings
       EngineVersion: 8.4 #Latest MySQL LTS
       DBInstanceClass: "db.t3.micro"
-      AllocatedStorage: 20     
-      #Default settings
+      AllocatedStorage: 20
       StorageType: gp3
+      #Default settings
       # NetworkType: IPV4
       # PubliclyAccessible: false
       MultiAZ: false

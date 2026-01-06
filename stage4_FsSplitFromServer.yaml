@@ -1,7 +1,7 @@
 # Refer to the .md file for this stage on how to create the other pre-requisite parameters.
 AWSTemplateFormatVersion: 2010-09-09
 Transform: 'AWS::LanguageExtensions'
-Description: WordPress application AWS architecture evolution - Stage 4 (Single EC2 instance with separate RDS database & EFS shared storage)
+Description: WordPress application AWS architecture evolution - Stage 4 (Single EC2 instance with separate RDS database, & EFS shared storage)
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
@@ -499,8 +499,8 @@ Resources:
       EngineVersion: 8.4 #Latest MySQL LTS
       DBInstanceClass: "db.t3.micro"
       AllocatedStorage: 20     
-      #Default settings
       StorageType: gp3
+      #Default settings
       # NetworkType: IPV4
       # PubliclyAccessible: false
       MultiAZ: false
