@@ -464,23 +464,28 @@ Resources:
             # Step 4 - Web Server Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
-            # Step 5 - Configure EFS to mount as the Wordpress content directory
-            mkdir -p /var/www/html/wp-content
-            echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
-            mount -a -t efs defaults
-            # Step 6 - Download & install Wordpress
+            # Step 5 - Download & install Wordpress BEFORE mounting EFS
             wget https://wordpress.org/latest.tar.gz -P /var/www/html
             cd /var/www/html
             tar -zxvf latest.tar.gz
             cp -rvf wordpress/* .
             rm -R wordpress
             rm latest.tar.gz
-            # Step 7 - Configure Wordpress
+            # Step 6 - Configure Wordpress
             cp ./wp-config-sample.php ./wp-config.php
             sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
             sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
+            # Step 7 - Migrate wp-content to EFS
+            mkdir -p /var/www/html/wp-content-backup
+            cp -r /var/www/html/wp-content/* /var/www/html/wp-content-backup/
+            rm -rf /var/www/html/wp-content
+            mkdir -p /var/www/html/wp-content
+            echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
+            mount -a -t efs defaults
+            cp -r /var/www/html/wp-content-backup/* /var/www/html/wp-content/
+            rm -rf /var/www/html/wp-content-backup
             # Step 8 - Fix the permissions
             usermod -a -G apache ec2-user   
             chown -R ec2-user:apache /var/www
@@ -491,8 +496,8 @@ Resources:
             cat >> /home/ec2-user/ip-update.sh<< 'EOF'
             #!/bin/bash
             source <(php -r 'require("/var/www/html/wp-config.php"); echo("DB_NAME=".DB_NAME."; DB_USER=".DB_USER."; DB_PASSWORD=".DB_PASSWORD."; DB_HOST=".DB_HOST); ')
-            SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p $DB_PASSWORD $DB_NAME -e"
-            OLD_URL=$(mysql -u $DB_USER -h $DB_HOST -p $DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
+            SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e"
+            OLD_URL=$(mysql -u $DB_USER -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
             ALBDNSName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/ALBDNSName --query Parameters[0].Value --output text)
             $SQL_COMMAND "UPDATE wp_options SET option_value = replace(option_value, '$OLD_URL', 'http://$ALBDNSName') WHERE option_name = 'home' OR option_name = 'siteurl';"
             $SQL_COMMAND "UPDATE wp_posts SET guid = replace(guid, '$OLD_URL','http://$ALBDNSName');"
@@ -572,6 +577,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: "wordpress-alb"
+      #Default settings
       # Type: application
       # Scheme: internet-facing
       # IpAddressType: ipv4
@@ -598,6 +604,7 @@ Resources:
       Protocol: HTTP
       Port: 80
       VpcId: !Ref VPC
+      #Default settings
       # HealthCheckEnabled: true
       # HealthCheckProtocol: HTTP
       # HealthCheckPath: '/'
@@ -614,14 +621,13 @@ Resources:
           Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
       VPCZoneIdentifier: [!Ref SubnetPublicA,!Ref SubnetPublicB,!Ref SubnetPublicC]
       TargetGroupARNs: [!Ref ALBTargetGroup]
-      # HealthCheckType: 'EC2, ELB'
       HealthCheckType: ELB
       HealthCheckGracePeriod: 300
       MetricsCollection: [Granularity: 1Minute]
       DesiredCapacity: 1
       MinSize: 1
-      ##Set MaxSize: 3 to test
-      MaxSize: 1
+      MaxSize: 3
+      #Default settings
       # NewInstancesProtectedFromScaleIn: false
       Tags:
         - Key: Name
@@ -649,12 +655,13 @@ Resources:
         - Name: AutoScalingGroupName
           Value: !Ref WordpressASG      
       Statistic: 'Average'
-      Period: 300
+      Period: 60
       Threshold: 40
       ComparisonOperator: GreaterThanThreshold
       # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
-      EvaluationPeriods: 1
-      AlarmDescription: "Scale out if CPU is greater than 40% for 5 minutes."
+      DatapointsToAlarm: 2
+      EvaluationPeriods: 3
+      AlarmDescription: "Scale out if CPU >40% for 2 out of 3 minutes."
       AlarmActions: [!Ref WpHighCpuScaleOut ]
   # Scaling-in
   WpLowCPUScaleIn:
@@ -681,3 +688,8 @@ Resources:
       EvaluationPeriods: 1
       AlarmDescription: "Scale in if CPU is less than 40% for 5 minutes."
       AlarmActions: [!Ref WpLowCPUScaleIn ]
+
+Outputs:
+  WordpressURL:
+    Description: Access WordPress installation at this URL (ALB DNS)
+    Value: !Sub 'http://${WordpressALB.DNSName}'
