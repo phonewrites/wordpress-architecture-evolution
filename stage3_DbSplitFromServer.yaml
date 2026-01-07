@@ -437,3 +437,8 @@ Resources:
         - !Ref SGDatabase
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
   #RDSinstance can be improved further with RDS proxy within this stage
+
+Outputs:
+  WordpressURL:
+    Description: Access WordPress installation at this URL
+    Value: !Sub 'http://${WordpressEC2.PublicIp}'

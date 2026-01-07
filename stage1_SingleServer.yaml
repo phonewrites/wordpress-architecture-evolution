@@ -340,3 +340,8 @@ Resources:
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
   #WordpressEC2 can be improved further with cfn scripts within this stage.
+
+Outputs:
+  WordpressURL:
+    Description: Access WordPress installation at this URL
+    Value: !Sub 'http://${WordpressEC2.PublicIp}'
