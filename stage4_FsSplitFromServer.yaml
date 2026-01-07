@@ -480,6 +480,21 @@ Resources:
           Value: Wordpress-LT-Fs-Split
   #WordpressEC2 can be improved further with cfn scripts within this stage
 
+  # Elastic IP to avoid WordPress URL issues on instance restart/replacement
+  WordpressEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: Wordpress-EIP
+  WordpressEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref WordpressEC2
+      EIP: !Ref WordpressEIP
+
 # RDS resources needed to split Database from the WordpressEC2 instance
   RDSSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -543,3 +558,9 @@ Resources:
               !Sub 'SubnetApp${zone}'
           SecurityGroups:
             - !GetAtt SGEFS.GroupId
+
+Outputs:
+  WordpressURL:
+    Description: Access WordPress at this stable URL (Elastic IP - persists across instance restarts)
+    Value: !Sub 'http://${WordpressEIP}'
+
