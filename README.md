@@ -22,27 +22,32 @@ Each stage builds upon the previous one, introducing new AWS services and archit
 
 ## Required SSM Parameters
 
-All stages require SSM SecureString parameters for database credentials. These must be created **before** deploying the CloudFormation templates. ❌ Avoid `/`, `@`, `"`, and spaces for these.
-Later in UserData bootstrap script, we import the above values by using the `get-parameters` subcommand & `--with-decryption` flag.
-We use dynamic references to pass the SecureString parameter values in the RDS DB Instance resource properties.
+> ⚠️ **Important**: SSM SecureString parameters cannot be created directly in CloudFormation templates and must be created manually before deployment.
 
->SSM **SecureString** parameters cannot be created directly in CloudFormation templates.
+All stages require SSM SecureString parameters for database credentials:
+- ❌ Avoid using `/`, `@`, `"`, or spaces in password values
+- Parameters are imported in UserData scripts using `get-parameters --with-decryption`
+- RDS instances reference parameters using CloudFormation dynamic references
 
-### Stages 1-2 (Local MariaDB)
-
-Create two SSM SecureString parameters for local database passwords:
-
+**For Stages 1-2** (Local MariaDB on EC2):
 ```bash
-aws ssm put-parameter --name "/Wordpress/DBPassword" --description "Wordpress Database Password" --type "SecureString" --value "YOUR_DB_PASSWORD"
-aws ssm put-parameter --name "/Wordpress/DBRootPassword" --description "Wordpress Database Root Password" --type "SecureString" --value "YOUR_ROOT_PASSWORD"
+aws ssm put-parameter --name "/Wordpress/DBPassword" \
+  --description "Wordpress Database Password" \
+  --type "SecureString" \
+  --value "YOUR_DB_PASSWORD"
+
+aws ssm put-parameter --name "/Wordpress/DBRootPassword" \
+  --description "Wordpress Database Root Password" \
+  --type "SecureString" \
+  --value "YOUR_ROOT_PASSWORD"
 ```
 
-### Stages 3-5 (RDS MySQL)
-
-Create one SSM SecureString parameter for RDS database password:
-
+**For Stages 3-5** (RDS MySQL):
 ```bash
-aws ssm put-parameter --name "/Wordpress/DBPassword" --description "Wordpress Database Password" --type "SecureString" --value "YOUR_DB_PASSWORD"
+aws ssm put-parameter --name "/Wordpress/DBPassword" \
+  --description "Wordpress Database Password" \
+  --type "SecureString" \
+  --value "YOUR_DB_PASSWORD"
 ```
 <hr style="border-top:6px solid #333; margin:24px 0;" />
 <br />
@@ -136,7 +141,7 @@ Stage 5 implements a **hybrid auto-scaling approach** optimized for the free-tie
 
 ### CloudWatch Alarms
 
-- **WpLowCreditAlarm**: Uses `Minimum` statistic to detect ANY instance in critical state
+- **WpLowCreditAlarm**: Uses `Minimum` statistic to detect *any* instance in critical state
 - **WpHighCpuAlarm**: Uses `Average` statistic across all instances
 - **WpLowCpuAlarm**: Uses `Average` statistic for scale-in decisions
 
@@ -187,6 +192,25 @@ aws ssm delete-parameter --name "/Wordpress/DBPassword"
 aws ssm delete-parameter --name "/Wordpress/DBRootPassword"
 ```
 
-## References:
-- https://github.com/acantril/learn-cantrill-io-labs/tree/master/aws-elastic-wordpress-evolution
-- https://aws.amazon.com/blogs/mt/using-aws-systems-manager-parameter-store-secure-string-parameters-in-aws-cloudformation-templates/
+## References
+- Original manual lab instructions: [acantril/learn-cantrill-io-labs](https://github.com/acantril/learn-cantrill-io-labs/tree/master/aws-elastic-wordpress-evolution)
+- AWS SSM Parameter Store guide: [Using SecureString Parameters in CloudFormation](https://aws.amazon.com/blogs/mt/using-aws-systems-manager-parameter-store-secure-string-parameters-in-aws-cloudformation-templates/)
+
+---
+
+## Major Changes from Original Project
+
+This repository is a complete Infrastructure as Code (IaC) re-implementation of Adrian Cantrill's manual WordPress evolution lab, providing fully automated CloudFormation templates instead of manual console instructions.
+
+- Self-contained CloudFormation templates with embedded VPC infrastructure for each stage (original used separate VPC template + manual resource creation)
+- One-command deployment per stage instead of manual AWS Console configuration of EC2, RDS, EFS, ALB, and ASG
+- Region-agnostic design with dynamic `${AWS::Region}` references instead of hardcoded `us-east-1`
+- Upgraded from Amazon Linux 2 to Amazon Linux 2023 with enhanced PHP extensions and corrected package names
+- Improved AWS CLI parsing using `--output text` flag instead of `sed` string manipulation
+- Secured WordPress download using `https://` instead of `http://`
+- Automated AMI selection via SSM Parameter Store
+- Simplified SSM parameter naming from `/A4L/Wordpress/*` to `/Wordpress/*`
+- Added Elastic IP in Stage 4 for WordPress URL persistence across instance restarts
+- Implemented hybrid auto-scaling in Stage 5 optimized for t2.micro free-tier instances with dual-metric approach (CPU credits + utilization)
+- CloudFormation signals (`cfn-signal`) for deployment validation and comprehensive inline documentation
+- Output URLs provided for all stages for easy access after deployment
