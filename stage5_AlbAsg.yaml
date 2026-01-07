@@ -648,7 +648,7 @@ Resources:
   WpHighCpuAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "Avg. CPU over 40 %" 
+      AlarmName: "Avg CPU over 40%" 
       MetricName: 'CPUUtilization'
       Namespace: 'AWS/EC2'
       Dimensions:
@@ -661,7 +661,7 @@ Resources:
       # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
       DatapointsToAlarm: 2
       EvaluationPeriods: 3
-      AlarmDescription: "Scale out if CPU >40% for 2 out of 3 minutes."
+      AlarmDescription: "Scale out if CPU > 40% for 2 out of 3 minutes."
       AlarmActions: [!Ref WpHighCpuScaleOut ]
   # Scaling-in
   WpLowCPUScaleIn:
@@ -675,18 +675,20 @@ Resources:
   WpLowCpuAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "Avg. CPU under 40 %" 
+      AlarmName: "Avg CPU under 40%" 
       MetricName: 'CPUUtilization'
       Namespace: 'AWS/EC2'
       Dimensions:
         - Name: AutoScalingGroupName
           Value: !Ref WordpressASG      
       Statistic: 'Average'
-      Period: 300
+      Period: 60
       Threshold: 40      
       ComparisonOperator: LessThanThreshold
-      EvaluationPeriods: 1
-      AlarmDescription: "Scale in if CPU is less than 40% for 5 minutes."
+      # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      DatapointsToAlarm: 2
+      EvaluationPeriods: 3
+      AlarmDescription: "Scale in if CPU < 40% for 2 out of 3 minutes."
       AlarmActions: [!Ref WpLowCPUScaleIn ]
 
 Outputs:
