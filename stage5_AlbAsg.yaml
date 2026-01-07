@@ -1,15 +1,18 @@
-# Refer to the .md file for this stage on how to create the other pre-requisite parameters.
+# IMPORTANT: Refer to the .md file for instructions on creating the DBPassword
+# SecureString parameter manually before deploying this template.
 AWSTemplateFormatVersion: 2010-09-09
 Transform: 'AWS::LanguageExtensions'
 Description: WordPress application AWS architecture evolution - Stage 5 (Auto-scaling EC2 instances with ALB, RDS database, & EFS shared storage)
 Parameters:
   LatestAmiId:
-    Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
+    Description: Latest Amazon Linux 2023 AMI for the WordPress instance
+    #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
+
 Resources:
 
-# Network skeleton with all 3 tiers of subnets
+# Network skeleton with all 3 tiers of subnets: Public, Db & App
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -273,7 +276,9 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Handler: "index.lambda_handler"
-      Code: #import cfnresponse below required to send respose back to CFN
+      # Custom resource Lambda to enable IPv6 auto-assignment on public subnets
+      # (CloudFormation doesn't natively support this via AssignIpv6AddressOnCreation)
+      Code: # cfnresponse import required to send response back to CloudFormation
         ZipFile:
           Fn::Sub: |
             import cfnresponse
@@ -297,7 +302,7 @@ Resources:
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
 
-# Parameters for storing all the important config items
+# SSM Parameters for WordPress configuration
   DBName:
     Type: AWS::SSM::Parameter
     Properties:
@@ -312,33 +317,32 @@ Resources:
       Description: "Wordpress Database User"
       Type: String
       Value: "wordpressuser"
-  # The DBEndpoint parameter is changed to the RDS endpoint instead of the EC2
   DBEndpoint:
     Type: AWS::SSM::Parameter
     Properties:
       Name: "/Wordpress/DBEndpoint"
       Description: "Wordpress Endpoint Name"
       Type: String
+      #Stage 3+: Points to RDS MySQL endpoint (not localhost)
       Value: !GetAtt RDSinstance.Endpoint.Address
-  # The EFSfsid parameter is used to connect the EFS to the EC2 
   EFSfsid:
     Type: AWS::SSM::Parameter
     Properties:
       Name: "/Wordpress/EFSfsid"
       Description: "File System ID of the EFS resource for storing Wordpress content"
       Type: String
+      #Stage 4+: EFS file system ID for shared wp-content across instances
       Value: !GetAtt WordpressEFS.FileSystemId
-  # The ALBDNSName parameter is used to connect the EFS to the EC2 
   ALBDNSName:
     Type: AWS::SSM::Parameter
     Properties:
       Name: "/Wordpress/ALBDNSName" 
       Description: "DNS Name of the wordpress-alb"
       Type: String
+      #Stage 5: ALB DNS used for WordPress URLs
       Value: !GetAtt WordpressALB.DNSName
-# Refer to the .md file for this stage on how to create SecureString parameters.
 
-# Auto-scaling app servers (no local DB) with ALB, separate RDS database, and EFS for shared file storage
+# WordPress auto-scaling with ALB + ASG + RDS + EFS
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -346,49 +350,47 @@ Resources:
       GroupName: wordpress-sg
       GroupDescription: "Restricted access to Wordpress instances"
       SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 ingress"
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
-          CidrIp: '0.0.0.0/0'
+          CidrIp: '0.0.0.0/0'  #Restrict to ALB security group only in production
   SGDatabase:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: database-sg
-      GroupDescription: "Controlled access to Database"
+      GroupDescription: "Allow MySQL connections from WordPress instances only"
       SecurityGroupIngress: 
-        - Description: "Allow MySQL ingress"
+        - Description: "Allow MySQL from WordPress security group (port 3306)"
           IpProtocol: tcp
           FromPort: '3306'
           ToPort: '3306'
-          SourceSecurityGroupId: !Ref SGWordpress
+          SourceSecurityGroupId: !Ref SGWordpress  #Only WordPress can connect
   SGEFS:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: efs-sg
-      GroupDescription: "Controlled access to EFS(NFS)"
+      GroupDescription: "Allow NFS connections from WordPress instances only"
       SecurityGroupIngress: 
-        - Description: "Allow NFS/EFS IPv4 ingress"
+        - Description: "Allow NFS from WordPress security group (port 2049)"
           IpProtocol: tcp
           FromPort: '2049'
           ToPort: '2049'
-          SourceSecurityGroupId: !Ref SGWordpress
+          SourceSecurityGroupId: !Ref SGWordpress  #Only WordPress can mount EFS
   SGALB:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: alb-sg
-      GroupDescription: "Controlled access to ALB"
+      GroupDescription: "Allow HTTP traffic to Application Load Balancer"
       SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 ingress"
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
-          CidrIp: '0.0.0.0/0'
-
-  WordpressInstanceProfile:
+          CidrIp: '0.0.0.0/0'  # Production: use CloudFront or restrict as needed
     Type: 'AWS::IAM::InstanceProfile'
     Properties:
       Path: /
@@ -406,24 +408,13 @@ Resources:
               - ec2.amazonaws.com
             Action:
               - 'sts:AssumeRole'
-      # Policies:
-      #   - PolicyName: "access-ssm-key"
-      #     PolicyDocument:
-      #       Version: "2012-10-17"
-      #       Statement:
-      #         - Sid: AccessSSMkey
-      #           Effect: Allow
-      #           Action:
-      #             - kms:Decrypt
-      #           Resource:
-      #             - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
       Path: /
       ManagedPolicyArns: 
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
-# Launch template modified to run app only, use EFS for content & point to ALB DNS name
+ #Launch template for ASG instances: app only, EFS for content, ALB DNS for WordPress URLs
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -442,7 +433,7 @@ Resources:
           - !GetAtt SGWordpress.GroupId
         IamInstanceProfile:
           Arn: !GetAtt WordpressInstanceProfile.Arn
-        #Allow instance termination for testing 
+        #Allow instance termination for testing
         DisableApiTermination: false
         CreditSpecification:
           CpuCredits: Standard
@@ -545,7 +536,7 @@ Resources:
         - !Ref SGDatabase
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
 
-# EFS resources needed to split Wordpress content from WordpressEC2
+# EFS for shared WordPress content across instances
   WordpressEFS:
     Type: 'AWS::EFS::FileSystem'
     Properties:
@@ -572,15 +563,12 @@ Resources:
           SecurityGroups:
             - !GetAtt SGEFS.GroupId
 
-# Resources needed for load balancing
+# Application Load Balancer for distributing traffic
   WordpressALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: "wordpress-alb"
-      #Default settings
-      # Type: application
-      # Scheme: internet-facing
-      # IpAddressType: ipv4
+      #Application Load Balancer in public subnets for internet access
       Subnets: 
         - !Ref SubnetPublicA
         - !Ref SubnetPublicB
@@ -610,7 +598,7 @@ Resources:
       # HealthCheckPath: '/'
       ProtocolVersion:  HTTP1
 
-# Resources needed for auto-scaling the Wordpress app EC2 instances
+# Auto Scaling Group for WordPress instances
   WordpressASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: InternetGatewayAttachment
@@ -621,22 +609,21 @@ Resources:
           Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
       VPCZoneIdentifier: [!Ref SubnetPublicA,!Ref SubnetPublicB,!Ref SubnetPublicC]
       TargetGroupARNs: [!Ref ALBTargetGroup]
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
-      MetricsCollection: [Granularity: 1Minute]
-      DesiredCapacity: 1
-      MinSize: 1
-      MaxSize: 3
-      #Default settings
-      # NewInstancesProtectedFromScaleIn: false
+      HealthCheckType: ELB  #Use ALB health checks (not just EC2 status checks)
+      HealthCheckGracePeriod: 300  #Wait 5 min for instance to fully initialize
+      MetricsCollection: [Granularity: 1Minute]  #Detailed CloudWatch metrics
+      DesiredCapacity: 1  #Normal operating state
+      MinSize: 1  #Always keep at least one instance running
+      MaxSize: 3  #Never exceed 3 instances (cost control)
       Tags:
         - Key: Name
-          Value: Wordpress-LT-ASG
+          Value: wordpress-asg
           PropagateAtLaunch: true
-    #WordpressASG can be improved further with cfn scripts within this stage.
-    #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-ec2-auto-scaling.html#scenario-as-updatepolicy
 
-  # Scaling-out with a hybrid strategy (for t2.micro resource constraints)
+# Auto-scaling policies: Hybrid approach with CPU credits + CPU utilization
+  #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+
+  #Scale-out Policy #1: Low CPU credits (t2.micro resource constraint)
   WpLowCreditScaleOut:
     Type: AWS::AutoScaling::ScalingPolicy
     Properties:
@@ -654,15 +641,17 @@ Resources:
       Dimensions:
         - Name: AutoScalingGroupName
           Value: !Ref WordpressASG      
-      Statistic: 'Minimum'
-      Period: 120
-      Threshold: 3
+      Statistic: 'Minimum'  #Detects if ANY instance is critically low
+      Period: 120  #2-minute evaluation periods
+      Threshold: 3  #Critical threshold (t2.micro has max 144 credits)
       ComparisonOperator: LessThanThreshold
-      #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      #Alarm triggers when 3 out of 4 datapoints are below threshold (6-8 minutes)
       DatapointsToAlarm: 3
       EvaluationPeriods: 4
-      AlarmDescription: "Scale out when ANY instance has credits below 3 (3 out of 4 datapoints = critically low on t2.micro)"
+      AlarmDescription: "Scale out when ANY instance drops below 3 credits (3 of 4 datapoints = critically low burst capacity)"
       AlarmActions: [!Ref WpLowCreditScaleOut ]
+
+  #Scale-out Policy #2: High CPU utilization (normal scaling)
   WpHighCpuScaleOut:
     Type: AWS::AutoScaling::ScalingPolicy
     Properties:
@@ -680,16 +669,17 @@ Resources:
       Dimensions:
         - Name: AutoScalingGroupName
           Value: !Ref WordpressASG      
-      Statistic: 'Average'
-      Period: 120
-      Threshold: 50
+      Statistic: 'Average'  #Average across all instances in ASG
+      Period: 120  #2-minute evaluation periods
+      Threshold: 50  #50% sustained utilization warrants scaling
       ComparisonOperator: GreaterThanThreshold
-      #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      #Alarm triggers when 2 out of 3 datapoints exceed threshold (4-6 minutes)
       DatapointsToAlarm: 2
       EvaluationPeriods: 3
-      AlarmDescription: "Scale out when CPU utilization exceeds 50% (high load with available credits)"
+      AlarmDescription: "Scale out when CPU >50% for 4-6 min (sustained high load with available credits)"
       AlarmActions: [!Ref WpHighCpuScaleOut ]
-  # Scaling-in based on low CPU utilization
+
+  #Scale-in Policy: Low CPU utilization
   WpLowCpuScaleIn:
     Type: AWS::AutoScaling::ScalingPolicy
     Properties:
@@ -701,21 +691,20 @@ Resources:
   WpLowCpuAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      #This alarm stays "In Alarm" state during normal conditions
-      AlarmName: "CPU Utilization Low - Scale In" 
+      AlarmName: "CPU Utilization Low - Scale In"
       MetricName: 'CPUUtilization'
       Namespace: 'AWS/EC2'
       Dimensions:
         - Name: AutoScalingGroupName
-          Value: !Ref WordpressASG      
-      Statistic: 'Average'
-      Period: 120
-      Threshold: 15      
+          Value: !Ref WordpressASG
+      Statistic: 'Average'  #Average across all instances
+      Period: 120  #2-minute evaluation periods
+      Threshold: 15  #Low threshold (idle or minimal load)
       ComparisonOperator: LessThanThreshold
-      #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      #Alarm triggers when 2 out of 3 datapoints are below threshold (~6 minutes)
       DatapointsToAlarm: 2
       EvaluationPeriods: 3
-      AlarmDescription: "Scale in when CPU utilization drops below 15%"
+      AlarmDescription: "Scale in when CPU <15% for ~6 min"
       AlarmActions: [!Ref WpLowCpuScaleIn ]
 
 Outputs:

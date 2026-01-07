@@ -1,14 +1,17 @@
-# Refer to the .md file for this stage on how to create the other pre-requisite parameters.
+# IMPORTANT: Refer to the .md file for instructions on creating the DBPassword
+# SecureString parameter manually before deploying this template.
 AWSTemplateFormatVersion: 2010-09-09
 Transform: 'AWS::LanguageExtensions'
 Description: WordPress application AWS architecture evolution - Stage 4 (Single EC2 instance with separate RDS database, & EFS shared storage)
 Parameters:
   LatestAmiId:
-    Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
+    Description: Latest Amazon Linux 2023 AMI for the WordPress instance
+    #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
+
 Resources:
-# Network skeleton with App subnets added for this stage of the project
+# Network skeleton with App subnets added for EFS resources (3 tiers: Public, Db & App)
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -272,7 +275,9 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Handler: "index.lambda_handler"
-      Code: #import cfnresponse below required to send respose back to CFN
+      # Custom resource Lambda to enable IPv6 auto-assignment on public subnets
+      # (CloudFormation doesn't natively support this via AssignIpv6AddressOnCreation)
+      Code: # cfnresponse import required to send response back to CloudFormation
         ZipFile:
           Fn::Sub: |
             import cfnresponse
@@ -296,7 +301,7 @@ Resources:
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
 
-# Parameters for storing all the important config items
+# SSM Parameters for WordPress configuration
   DBName:
     Type: AWS::SSM::Parameter
     Properties:
@@ -311,61 +316,60 @@ Resources:
       Description: "Wordpress Database User"
       Type: String
       Value: "wordpressuser"
-  # The DBEndpoint parameter is changed to the RDS endpoint instead of the EC2
   DBEndpoint:
     Type: AWS::SSM::Parameter
     Properties:
       Name: "/Wordpress/DBEndpoint"
       Description: "Wordpress Endpoint Name"
       Type: String
+      #Stage 3+: Points to RDS MySQL endpoint (not localhost)
       Value: !GetAtt RDSinstance.Endpoint.Address
-  # The EFSfsid parameter is used to connect the EFS to the EC2 
   EFSfsid:
     Type: AWS::SSM::Parameter
     Properties:
       Name: "/Wordpress/EFSfsid"
       Description: "File System ID of the EFS resource for storing Wordpress content"
       Type: String
+      #Stage 4: EFS file system ID used for mounting shared wp-content directory
       Value: !GetAtt WordpressEFS.FileSystemId
-# Refer to the .md file for this stage on how to create SecureString parameters.
 
-# App-only Single Server (no local DB) with separate RDS database & EFS for shared file storage
+# WordPress app server + RDS + EFS
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: wordpress-sg
-      GroupDescription: "Restricted access to Wordpress instances"
+      GroupDescription: "Allow HTTP traffic to WordPress web server"
       SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 ingress"
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
-          CidrIp: '0.0.0.0/0'
+          CidrIp: '0.0.0.0/0'  # Production: restrict to specific IPs/ranges
   SGDatabase:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: database-sg
-      GroupDescription: "Controlled access to Database"
+      GroupDescription: "Allow MySQL connections from WordPress instances only"
       SecurityGroupIngress: 
-        - Description: "Allow MySQL ingress"
+        - Description: "Allow MySQL from WordPress security group (port 3306)"
           IpProtocol: tcp
           FromPort: '3306'
           ToPort: '3306'
-          SourceSecurityGroupId: !Ref SGWordpress
+          SourceSecurityGroupId: !Ref SGWordpress  #Only WordPress can connect
   SGEFS:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: efs-sg
-      GroupDescription: "Controlled access to EFS(NFS)"
+      GroupDescription: "Allow NFS connections from WordPress instances only"
       SecurityGroupIngress: 
-        - Description: "Allow NFS/EFS IPv4 ingress"
+        - Description: "Allow NFS from WordPress security group (port 2049)"
           IpProtocol: tcp
           FromPort: '2049'
           ToPort: '2049'
-          SourceSecurityGroupId: !Ref SGWordpress
+          SourceSecurityGroupId: !Ref SGWordpress  #Only WordPress can mount EFS
 
   WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
@@ -385,24 +389,13 @@ Resources:
               - ec2.amazonaws.com
             Action:
               - 'sts:AssumeRole'
-      # Policies:
-      #   - PolicyName: "access-ssm-key"
-      #     PolicyDocument:
-      #       Version: "2012-10-17"
-      #       Statement:
-      #         - Sid: AccessSSMkey
-      #           Effect: Allow
-      #           Action:
-      #             - kms:Decrypt
-      #           Resource:
-      #             - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
       Path: /
       ManagedPolicyArns: 
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
 
-# Launch template modified to run app only & use EFS for content
+ #Launch template modified to run app only & use EFS for content
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:

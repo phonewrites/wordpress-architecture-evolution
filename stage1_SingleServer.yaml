@@ -8,6 +8,7 @@ Parameters:
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
     
 Resources:
+
 # Initial network skeleton with public subnets only
   VPC:
     Type: AWS::EC2::VPC
@@ -238,7 +239,7 @@ Resources:
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
-          CidrIp: '0.0.0.0/0'  #In production: restrict to specific IPs/ranges
+          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
   WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
     Properties:
