@@ -658,7 +658,7 @@ Resources:
       Period: 120
       Threshold: 3
       ComparisonOperator: LessThanThreshold
-      # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
       DatapointsToAlarm: 3
       EvaluationPeriods: 4
       AlarmDescription: "Scale out when ANY instance has credits below 3 (3 out of 4 datapoints = critically low on t2.micro)"
@@ -684,7 +684,7 @@ Resources:
       Period: 120
       Threshold: 50
       ComparisonOperator: GreaterThanThreshold
-      # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
       DatapointsToAlarm: 2
       EvaluationPeriods: 3
       AlarmDescription: "Scale out when CPU utilization exceeds 50% (high load with available credits)"
@@ -701,6 +701,7 @@ Resources:
   WpLowCpuAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
+      #This alarm stays "In Alarm" state during normal conditions
       AlarmName: "CPU Utilization Low - Scale In" 
       MetricName: 'CPUUtilization'
       Namespace: 'AWS/EC2'
@@ -711,7 +712,7 @@ Resources:
       Period: 120
       Threshold: 15      
       ComparisonOperator: LessThanThreshold
-      # For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
+      #For "M out of N" alarm, M = DatapointsToAlarm & N = EvaluationPeriods
       DatapointsToAlarm: 2
       EvaluationPeriods: 3
       AlarmDescription: "Scale in when CPU utilization drops below 15%"
