@@ -2,7 +2,8 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: WordPress application AWS architecture evolution - Stage 1 (Standalone EC2 instance with direct configuration)
 Parameters:
   LatestAmiId:
-    Description: Latest Amazon Linux 2023 AMI for the Wordpess instance
+    Description: Latest Amazon Linux 2023 AMI for the WordPress instance
+    #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
     
@@ -171,11 +172,13 @@ Resources:
               Action:
               - ec2:ModifySubnetAttribute
               Resource: "*"
+  # Custom resource Lambda to enable IPv6 auto-assignment on public subnets
+  # (CloudFormation doesn't natively support this via AssignIpv6AddressOnCreation)
   IPv6WorkaroundLambda:
     Type: AWS::Lambda::Function
     Properties:
       Handler: "index.lambda_handler"
-      Code: #import cfnresponse below required to send respose back to CFN
+      Code: #cfnresponse import required to send response back to CloudFormation
         ZipFile:
           Fn::Sub: |
             import cfnresponse
@@ -199,7 +202,7 @@ Resources:
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
 
-# Parameters for storing all the important config items
+# Parameters for storing WordPress configuration (database credentials, endpoints)
   DBName:
     Type: AWS::SSM::Parameter
     Properties:
@@ -220,22 +223,22 @@ Resources:
       Name: "/Wordpress/DBEndpoint"
       Description: "Wordpress Endpoint Name"
       Type: String
-      Value: "localhost"
-  ## Refer to the .md file for this stage on how to create SecureString parameters.
+      Value: "localhost"  #Stage 1: MariaDB runs locally on same EC2 instance
+  #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
-# Directly configured standalone single server
+# All-in-one server: Web server (Apache) + WordPress application + MariaDB
   SGWordpress:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
       VpcId: !Ref VPC
       GroupName: wordpress-sg
-      GroupDescription: "Restricted access to Wordpress instances"
+      GroupDescription: "Allow HTTP traffic to WordPress web server"
       SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 ingress"
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
-          CidrIp: '0.0.0.0/0'
+          CidrIp: '0.0.0.0/0'  #In production: restrict to specific IPs/ranges
   WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
     Properties:
@@ -254,17 +257,6 @@ Resources:
               - ec2.amazonaws.com
             Action:
               - 'sts:AssumeRole'
-      # Policies:
-      #   - PolicyName: "access-ssm-key"
-      #     PolicyDocument:
-      #       Version: "2012-10-17"
-      #       Statement:
-      #         - Sid: AccessSSMkey
-      #           Effect: Allow
-      #           Action:
-      #             - kms:Decrypt
-      #           Resource:
-      #             - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/8cd74040-619f-4b4a-ad54-65270bedaba3"
       Path: /
       ManagedPolicyArns: 
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
