@@ -14,6 +14,8 @@ This project demonstrates a step-by-step evolution of WordPress architecture on 
 
 Each stage builds upon the previous one, introducing new AWS services and architectural patterns to improve scalability, reliability, and maintainability.
 
+> ⚠️ Each stage is a **self-contained, independent CloudFormation stack**. They represent different architectural phases, not an in-place upgrade path. Deploying a new stage template to an existing stack will replace resources (like EC2 instances), destroying your WordPress application setup. Deploy each stage as a fresh stack to demonstrate that specific architectural pattern.
+
 ## Prerequisites
 
 - AWS Account with appropriate permissions
@@ -22,7 +24,7 @@ Each stage builds upon the previous one, introducing new AWS services and archit
 
 ## Required SSM Parameters
 
-> ⚠️ **Important**: SSM SecureString parameters cannot be created directly in CloudFormation templates and must be created manually before deployment.
+> ⚠️ SSM SecureString parameters cannot be created directly in CloudFormation templates and must be created manually before deployment.
 
 All stages require SSM SecureString parameters for database credentials:
 - ❌ Avoid using `/`, `@`, `"`, or spaces in password values
@@ -54,6 +56,11 @@ aws ssm put-parameter --name "/Wordpress/DBPassword" \
 <br />
 
 # Deployment Instructions
+
+> 💡 **Deployment Strategy**: Each stage is a complete, standalone stack with its own VPC and all required resources. To explore the architectural evolution:
+> 1. Deploy a stage, configure WordPress, and explore the architecture
+> 2. Delete the stack when done: `aws cloudformation delete-stack --stack-name <stack-name>`
+> 3. Deploy the next stage with a different stack name to see the next architectural phase
 
 ### Stage 1: Single Server (All-in-One)
 
@@ -184,6 +191,13 @@ Security groups follow the principle of least privilege:
 ### IPv6 Configuration
 
 CloudFormation doesn't natively support the `AssignIpv6AddressOnCreation` subnet attribute. The templates include a Lambda-backed custom resource to enable this feature automatically.
+
+## Cleanup
+
+To delete a deployed stage and all its resources:
+```bash
+aws cloudformation delete-stack --stack-name [STACK-NAME]
+```
 
 ### 👉 SSM SecureString parameters must be deleted manually:
 
