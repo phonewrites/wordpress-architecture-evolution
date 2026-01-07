@@ -440,23 +440,28 @@ Resources:
             # Step 4 - Web Server Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
-            # Step 5 - Configure EFS to mount as the Wordpress content directory
-            mkdir -p /var/www/html/wp-content
-            echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
-            mount -a -t efs defaults
-            # Step 6 - Download & install Wordpress
+            # Step 5 - Download & install Wordpress BEFORE mounting EFS
             wget https://wordpress.org/latest.tar.gz -P /var/www/html
             cd /var/www/html
             tar -zxvf latest.tar.gz
             cp -rvf wordpress/* .
             rm -R wordpress
             rm latest.tar.gz
-            # Step 7 - Configure Wordpress
+            # Step 6 - Configure Wordpress
             cp ./wp-config-sample.php ./wp-config.php
             sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
             sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
+            # Step 7 - Migrate wp-content to EFS
+            mkdir -p /var/www/html/wp-content-backup
+            cp -r /var/www/html/wp-content/* /var/www/html/wp-content-backup/
+            rm -rf /var/www/html/wp-content
+            mkdir -p /var/www/html/wp-content
+            echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
+            mount -a -t efs defaults
+            cp -r /var/www/html/wp-content-backup/* /var/www/html/wp-content/
+            rm -rf /var/www/html/wp-content-backup
             # Step 8 - Fix the permissions
             usermod -a -G apache ec2-user   
             chown -R ec2-user:apache /var/www
@@ -538,5 +543,3 @@ Resources:
               !Sub 'SubnetApp${zone}'
           SecurityGroups:
             - !GetAtt SGEFS.GroupId
-
-
