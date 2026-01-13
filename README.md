@@ -1,6 +1,6 @@
 # WordPress App AWS Architecture Evolution
 
-CloudFormation (IaC) version of the manual demo project from one of Adrian Cantrill's courses.
+CloudFormation (IaC) version of the **[manual demo project](https://github.com/acantril/learn-cantrill-io-labs/tree/master/aws-elastic-wordpress-evolution)** from one of Adrian Cantrill's courses.
 
 ## Architecture Stages
 
