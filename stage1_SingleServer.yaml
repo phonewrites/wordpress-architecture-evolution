@@ -5,8 +5,23 @@ Parameters:
     Description: Latest Amazon Linux 2023 AMI for the WordPress instance
     #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
-    
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
+  EnableSnapshotStack:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      When true, create in-template resources (Lambda + custom resource) to snapshot WordpressEC2 root EBS volume.
+      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in. No separate S3 template required.
+  SnapshotNonce:
+    Type: String
+    Default: initial
+    Description: >-
+      Change when EnableSnapshotStack is true to force a new snapshot on stack update (e.g. v2, timestamp).
+
+Conditions:
+  CreateSnapshotStack: !Equals [!Ref EnableSnapshotStack, 'true']
+
 Resources:
 
 # Initial network skeleton with public subnets only
@@ -27,7 +42,8 @@ Resources:
       AvailabilityZone: !Select [ 0, !GetAZs '' ]
       CidrBlock: 10.125.0.0/20
       MapPublicIpOnLaunch: true
-      Ipv6CidrBlock: 
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock:
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
           - SubnetPart: '00::/64'
@@ -43,7 +59,8 @@ Resources:
       AvailabilityZone: !Select [ 1, !GetAZs '' ]
       CidrBlock: 10.125.16.0/20
       MapPublicIpOnLaunch: true
-      Ipv6CidrBlock: 
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock:
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
           - SubnetPart: '01::/64'
@@ -59,7 +76,8 @@ Resources:
       AvailabilityZone: !Select [ 2, !GetAZs '' ]
       CidrBlock: 10.125.32.0/20
       MapPublicIpOnLaunch: true
-      Ipv6CidrBlock: 
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock:
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
           - SubnetPart: '02::/64'
@@ -126,82 +144,6 @@ Resources:
       SubnetId: !Ref SubnetPublicC
       RouteTableId:
         Ref: RTPublic
-  IPv6WorkaroundSubnetPublicA:
-    Type: Custom::SubnetModify
-    Properties:
-      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
-      SubnetId: !Ref SubnetPublicA
-  IPv6WorkaroundSubnetPublicB:
-    Type: Custom::SubnetModify
-    Properties:
-      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
-      SubnetId: !Ref SubnetPublicB
-  IPv6WorkaroundSubnetPublicC:
-    Type: Custom::SubnetModify
-    Properties:
-      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
-      SubnetId: !Ref SubnetPublicC
-  IPv6WorkaroundRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal:
-            Service:
-            - lambda.amazonaws.com
-          Action:
-          - sts:AssumeRole
-      Path: "/"
-      Policies:
-        - PolicyName: !Sub "ipv6-fix-logs-${AWS::StackName}"
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-            - Effect: Allow
-              Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-              Resource: arn:aws:logs:*:*:*
-        - PolicyName: !Sub "ipv6-fix-modify-${AWS::StackName}"
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-            - Effect: Allow
-              Action:
-              - ec2:ModifySubnetAttribute
-              Resource: "*"
-  # Custom resource Lambda to enable IPv6 auto-assignment on public subnets
-  # (CloudFormation doesn't natively support this via AssignIpv6AddressOnCreation)
-  IPv6WorkaroundLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: "index.lambda_handler"
-      Code: #cfnresponse import required to send response back to CloudFormation
-        ZipFile:
-          Fn::Sub: |
-            import cfnresponse
-            import boto3
-
-            def lambda_handler(event, context):
-                if event['RequestType'] is 'Delete':
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS)
-                  return
-
-                responseValue = event['ResourceProperties']['SubnetId']
-                ec2 = boto3.client('ec2', region_name='${AWS::Region}')
-                ec2.modify_subnet_attribute(AssignIpv6AddressOnCreation={
-                                                'Value': True
-                                              },
-                                              SubnetId=responseValue)
-                responseData = {}
-                responseData['SubnetId'] = responseValue
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
-      Runtime: python3.9
-      Role: !GetAtt IPv6WorkaroundRole.Arn
-      Timeout: 30
 
 # Parameters for storing WordPress configuration (database credentials, endpoints)
   DBName:
@@ -272,7 +214,7 @@ Resources:
       - DBEndpoint
     CreationPolicy:
       ResourceSignal:
-        Timeout: PT10M
+        Timeout: PT15M
     Properties:
       InstanceType: t2.micro
       ImageId: !Ref LatestAmiId
@@ -292,25 +234,21 @@ Resources:
           DBEndpoint=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBEndpoint --query Parameters[0].Value --output text)
           DBPassword=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBPassword --with-decryption --query Parameters[0].Value --output text)
           DBRootPassword=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBRootPassword --with-decryption --query Parameters[0].Value --output text)
-          # Step 2 - System Updates
-          dnf -y update
-          dnf -y upgrade
+          # Step 2 - Run system updates
+          dnf -y --refresh upgrade
           # Step 3 - Install system software - including Web and DB
-          dnf install wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel mariadb105-server stress -y
+          dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress mariadb1011-server
           # Step 4 - Web and DB Servers Online - and set to startup
-          systemctl enable httpd
-          systemctl enable mariadb
-          systemctl start httpd
-          systemctl start mariadb
+          systemctl enable httpd mariadb
+          systemctl start httpd mariadb
           # Step 5 - Set MariaDB Root Password
-          mysqladmin -u root password $DBRootPassword
+          mysqladmin -u root password "$DBRootPassword"
           # Step 6 - Download & install Wordpress
           wget https://wordpress.org/latest.tar.gz -P /var/www/html
           cd /var/www/html
           tar -zxvf latest.tar.gz
           cp -rvf wordpress/* .
-          rm -R wordpress
-          rm latest.tar.gz
+          rm -rf wordpress latest.tar.gz
           # Step 7 - Configure Wordpress
           cp ./wp-config-sample.php ./wp-config.php
           sed -i "s/'database_name_here'/'$DBName'/g" wp-config.php
@@ -318,7 +256,7 @@ Resources:
           sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
           sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
           # Step 8 - Fix the permissions
-          usermod -a -G apache ec2-user   
+          usermod -a -G apache ec2-user
           chown -R ec2-user:apache /var/www
           chmod 2775 /var/www
           find /var/www -type d -exec chmod 2775 {} \;
@@ -328,13 +266,123 @@ Resources:
           echo "CREATE USER '$DBUser'@'localhost' IDENTIFIED BY '$DBPassword';" >> /tmp/db.setup
           echo "GRANT ALL ON $DBName.* TO '$DBUser'@'localhost';" >> /tmp/db.setup
           echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
-          mysql -u root --password=$DBRootPassword < /tmp/db.setup
-          sudo rm /tmp/db.setup          
+          mysql -u root --password="$DBRootPassword" < /tmp/db.setup
+          rm -f /tmp/db.setup
           # STEP 10 Signal end of installation & configuration
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
   #WordpressEC2 can be improved further with cfn scripts within this stage.
+
+
+# Optional in-template crash-consistent root EBS snapshot
+  SnapshotHelperRole:
+    Type: AWS::IAM::Role
+    Condition: CreateSnapshotStack
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshot
+                  - ec2:CreateTags
+                Resource: '*'
+
+  SnapshotHelperLambda:
+    Type: AWS::Lambda::Function
+    Condition: CreateSnapshotStack
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt SnapshotHelperRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.SUCCESS,
+                          {},
+                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
+                      )
+                      return
+                  props = event["ResourceProperties"]
+                  instance_id = props["InstanceId"]
+                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
+                  parent = (props.get("ParentStackName") or "")[:256]
+                  ec2 = boto3.client("ec2")
+                  di = ec2.describe_instances(InstanceIds=[instance_id])
+                  if not di.get("Reservations"):
+                      raise RuntimeError("Instance not found: %s" % instance_id)
+                  inst = di["Reservations"][0]["Instances"][0]
+                  root = inst["RootDeviceName"]
+                  vol_id = None
+                  for bdm in inst.get("BlockDeviceMappings", []):
+                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
+                          vol_id = bdm["Ebs"]["VolumeId"]
+                          break
+                  if not vol_id:
+                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
+                  tags = [{"Key": "Name", "Value": desc[:255]}]
+                  if parent:
+                      tags.append({"Key": "ParentStack", "Value": parent})
+                  snap = ec2.create_snapshot(
+                      VolumeId=vol_id,
+                      Description=desc,
+                      TagSpecifications=[
+                          {"ResourceType": "snapshot", "Tags": tags},
+                      ],
+                  )
+                  sid = snap["SnapshotId"]
+                  data = {"SnapshotId": sid, "VolumeId": vol_id}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      event.get("PhysicalResourceId", "failed"),
+                  )
+
+  WordpressRootEbsSnapshot:
+    Type: Custom::WordpressRootEbsSnapshot
+    Condition: CreateSnapshotStack
+    DependsOn: WordpressEC2
+    Properties:
+      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
+      InstanceId: !Ref WordpressEC2
+      Description: !Sub 'wp-stage1-${AWS::StackName}-root'
+      Nonce: !Ref SnapshotNonce
+      ParentStackName: !Ref AWS::StackName
 
 Outputs:
   WordpressURL:
     Description: Access WordPress installation at this URL
     Value: !Sub 'http://${WordpressEC2.PublicIp}'
+  WordpressRootSnapshotId:
+    Condition: CreateSnapshotStack
+    Description: EBS snapshot ID of WordpressEC2 root volume (EnableSnapshotStack true)
+    Value: !GetAtt WordpressRootEbsSnapshot.SnapshotId
+  WordpressRootVolumeId:
+    Condition: CreateSnapshotStack
+    Description: Root EBS volume ID at time of snapshot
+    Value: !GetAtt WordpressRootEbsSnapshot.VolumeId
