@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  WordPress architecture evolution - Stage 1a: same stack as stage1_SingleServer.yaml plus optional in-template root EBS snapshot
-  (Lambda + Custom::WordpressRootEbsSnapshot). Deploy stage1 first, then update-stack with this template on the same stack name to add
-  snapshot parameters and resources without opting in until EnableSnapshotStack=true. UserData matches stage1 (including Option B browser-host URLs via bash/awk).
+  WordPress application AWS architecture evolution - Stage 1a
+  Standalone EC2 instance with direct configuration + optional in-template root EBS snapshot
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI for the WordPress instance
@@ -18,9 +17,13 @@ Parameters:
       First deploy can leave false; after WordPress is set up, update the same stack with true to opt in. No separate S3 template required.
   SnapshotNonce:
     Type: String
-    Default: initial
+    Default: v1
+    AllowedPattern: '^v[1-9][0-9]*$'
+    ConstraintDescription: >-
+      v then a positive integer (v1, v2, v3, …).
+    MaxLength: 16
     Description: >-
-      Change when EnableSnapshotStack is true to force a new snapshot on stack update (e.g. v2, timestamp).
+      When EnableSnapshotStack is true, bump on update-stack to force a new snapshot (e.g. v1 → v2). Must match v + integer.
 
 Conditions:
   CreateSnapshotStack: !Equals [!Ref EnableSnapshotStack, 'true']
@@ -259,19 +262,19 @@ Resources:
           sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
           sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
           # Step 8 - Use the browser address for Wordpress site links
-          if ! grep -q 'Option B: WP_HOME' wp-config.php; then
-            WP_SNIP=$(mktemp)
-            WP_OUT=$(mktemp)
-            cat > "$WP_SNIP" <<'WPOPTB_SNIP'
-          /* Option B: WP_HOME/WP_SITEURL follow browser HTTP_HOST when not CLI (no fixed public IP in redirects). */
+          if ! grep -q 'Follow browser hostname for WP_HOME' wp-config.php; then
+            WPCONFIG_INSERT_TMP=$(mktemp)
+            WPCONFIG_MERGED_TMP=$(mktemp)
+            cat > "$WPCONFIG_INSERT_TMP" <<'WPCONFIG_BROWSER_HOST_SNIPPET'
+          /* Follow browser hostname for WP_HOME and WP_SITEURL (HTTP_HOST; no fixed public IP in redirects). */
           if (php_sapi_name() !== 'cli' && !empty($_SERVER['HTTP_HOST'])) {
               define('WP_HOME', 'http://' . $_SERVER['HTTP_HOST']);
               define('WP_SITEURL', 'http://' . $_SERVER['HTTP_HOST']);
           }
-          WPOPTB_SNIP
-            awk 'NR==FNR { buf = buf $0 ORS; next } /stop editing! Happy publishing/ && !done { printf "%s", buf; done=1 } { print }' "$WP_SNIP" wp-config.php > "$WP_OUT"
-            mv "$WP_OUT" wp-config.php
-            rm -f "$WP_SNIP"
+          WPCONFIG_BROWSER_HOST_SNIPPET
+            awk 'NR==FNR { buf = buf $0 ORS; next } /stop editing! Happy publishing/ && !done { printf "%s", buf; done=1 } { print }' "$WPCONFIG_INSERT_TMP" wp-config.php > "$WPCONFIG_MERGED_TMP"
+            mv "$WPCONFIG_MERGED_TMP" wp-config.php
+            rm -f "$WPCONFIG_INSERT_TMP"
           fi
           # Step 9 - Fix the permissions
           usermod -a -G apache ec2-user
@@ -361,6 +364,9 @@ Resources:
                   tags = [{"Key": "Name", "Value": desc[:255]}]
                   if parent:
                       tags.append({"Key": "ParentStack", "Value": parent})
+                  nonce = (props.get("Nonce") or "")[:256]
+                  if nonce:
+                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
                   snap = ec2.create_snapshot(
                       VolumeId=vol_id,
                       Description=desc,
