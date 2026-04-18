@@ -184,43 +184,6 @@ Resources:
       #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
 # All-in-one server: Web server (Apache) + WordPress application + MariaDB
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupName: wordpress-sg
-      GroupDescription: "Allow HTTP traffic to WordPress web server"
-      SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
-
   WordpressEC2:
     Type: AWS::EC2::Instance
     DependsOn:
@@ -340,8 +303,7 @@ Resources:
           # Step 12 - Signal end of installation & configuration via cfn-signal
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
 
-
-# Optional in-template crash-consistent root EBS snapshot
+# Optional resources for crash-consistent root EBS snapshot
   SnapshotHelperRole:
     Type: AWS::IAM::Role
     Condition: CreateSnapshotStack
@@ -443,6 +405,46 @@ Resources:
       Description: !Sub 'wp-stage1-${AWS::StackName}-root'
       Nonce: !Ref SnapshotNonce
       ParentStackName: !Ref AWS::StackName
+
+# Other resources for WordPress server 
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: wordpress-sg
+      GroupDescription: "Allow HTTP traffic to WordPress web server"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
+
+
 
 Outputs:
   WordpressURL:

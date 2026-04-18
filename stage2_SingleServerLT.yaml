@@ -194,44 +194,7 @@ Resources:
       Value: "localhost"  #Stage 2: MariaDB runs locally on same EC2 instance
       #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
-# WordPress server launched from Launch Template
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupName: wordpress-sg
-      GroupDescription: "Allow HTTP traffic to WordPress web server"
-      SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
-
+# WordPress server Launch Template for fresh WordPress install – greenfield stage2 stack 
   FreshWordpressLT:
     Type: AWS::EC2::LaunchTemplate
     Condition: UseFreshAmiRoot
@@ -364,6 +327,110 @@ Resources:
             # Step 12 - Signal end of installation & configuration via cfn-signal
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2FromLT --region ${AWS::Region}
 
+# Optional resources for crash-consistent root EBS snapshot
+  SnapshotHelperRole:
+    Type: AWS::IAM::Role
+    Condition: CreateSnapshotStack
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshot
+                  - ec2:CreateTags
+                Resource: '*'
+
+  SnapshotHelperLambda:
+    Type: AWS::Lambda::Function
+    Condition: CreateSnapshotStack
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt SnapshotHelperRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.SUCCESS,
+                          {},
+                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
+                      )
+                      return
+                  props = event["ResourceProperties"]
+                  instance_id = props["InstanceId"]
+                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
+                  parent = (props.get("ParentStackName") or "")[:256]
+                  ec2 = boto3.client("ec2")
+                  di = ec2.describe_instances(InstanceIds=[instance_id])
+                  if not di.get("Reservations"):
+                      raise RuntimeError("Instance not found: %s" % instance_id)
+                  inst = di["Reservations"][0]["Instances"][0]
+                  root = inst["RootDeviceName"]
+                  vol_id = None
+                  for bdm in inst.get("BlockDeviceMappings", []):
+                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
+                          vol_id = bdm["Ebs"]["VolumeId"]
+                          break
+                  if not vol_id:
+                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
+                  tags = [{"Key": "Name", "Value": desc[:255]}]
+                  if parent:
+                      tags.append({"Key": "ParentStack", "Value": parent})
+                  nonce = (props.get("Nonce") or "")[:256]
+                  if nonce:
+                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
+                  snap = ec2.create_snapshot(
+                      VolumeId=vol_id,
+                      Description=desc,
+                      TagSpecifications=[
+                          {"ResourceType": "snapshot", "Tags": tags},
+                      ],
+                  )
+                  sid = snap["SnapshotId"]
+                  data = {"SnapshotId": sid, "VolumeId": vol_id}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      event.get("PhysicalResourceId", "failed"),
+                  )
+
+  WordpressRootEbsSnapshot:
+    Type: Custom::WordpressRootEbsSnapshot
+    Condition: CreateSnapshotStack
+    Properties:
+      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
+      InstanceId: !Ref WordpressEC2FromLT
+      Description: !Sub 'wp-stage2-${AWS::StackName}-root'
+      Nonce: !Ref SnapshotNonce
+      ParentStackName: !Ref AWS::StackName
+
+# Optional resources for restoring from RestoreRootSnapshotId
   RestoreRootAmiRole:
     Type: AWS::IAM::Role
     Condition: HasRestoreSnapshot
@@ -493,6 +560,7 @@ Resources:
       AmiName: !Sub '${AWS::StackName}-wp-root-${RestoreRootSnapshotId}'
       RootDeviceName: /dev/xvda
 
+# WordPress server Launch Template for stack update from stage1 to stage2 
   WordpressLT:
     Type: AWS::EC2::LaunchTemplate
     Condition: HasRestoreSnapshot
@@ -502,9 +570,6 @@ Resources:
       - DBUser
       - DBEndpoint
     Properties:
-      # Unique per region: prefix with stack. RestoreRootSnapshotId in the name is not required for 1b→2 (new EC2 logical
-      # id already replaces the instance) but helps snap-A→snap-B on the same stack: LT name cannot change in EC2 after
-      # create, so a new snapshot id → new physical LT → new LaunchTemplateId on WordpressEC2FromLT avoids root snapshot mutate errors.
       LaunchTemplateName: !Sub '${AWS::StackName}-wordpress-restore-${RestoreRootSnapshotId}'
       VersionDescription: Evolutionary / restore — root from RestoreRootSnapshotId (EBS snapshot boot)
       LaunchTemplateData:
@@ -628,6 +693,7 @@ Resources:
             # Step 12 - Signal end of installation & configuration via cfn-signal
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2FromLT --region ${AWS::Region}
 
+# WordPress server launched from one of the above Launch Templates 
   WordpressEC2FromLT:
     Type: AWS::EC2::Instance
     DependsOn:
@@ -674,107 +740,45 @@ Resources:
         - Key: CfnMetadataNonce
           Value: !Sub '${CfnMetadataNonce}'
 
-  SnapshotHelperRole:
-    Type: AWS::IAM::Role
-    Condition: CreateSnapshotStack
+# Other resources for WordPress server 
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: wordpress-sg
+      GroupDescription: "Allow HTTP traffic to WordPress web server"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeInstances
-                  - ec2:CreateSnapshot
-                  - ec2:CreateTags
-                Resource: '*'
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
 
-  SnapshotHelperLambda:
-    Type: AWS::Lambda::Function
-    Condition: CreateSnapshotStack
-    Properties:
-      Handler: index.handler
-      Runtime: python3.12
-      Role: !GetAtt SnapshotHelperRole.Arn
-      Timeout: 120
-      Code:
-        ZipFile: |
-          import cfnresponse
-          import boto3
 
-          def handler(event, context):
-              try:
-                  if event["RequestType"] == "Delete":
-                      cfnresponse.send(
-                          event,
-                          context,
-                          cfnresponse.SUCCESS,
-                          {},
-                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
-                      )
-                      return
-                  props = event["ResourceProperties"]
-                  instance_id = props["InstanceId"]
-                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
-                  parent = (props.get("ParentStackName") or "")[:256]
-                  ec2 = boto3.client("ec2")
-                  di = ec2.describe_instances(InstanceIds=[instance_id])
-                  if not di.get("Reservations"):
-                      raise RuntimeError("Instance not found: %s" % instance_id)
-                  inst = di["Reservations"][0]["Instances"][0]
-                  root = inst["RootDeviceName"]
-                  vol_id = None
-                  for bdm in inst.get("BlockDeviceMappings", []):
-                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
-                          vol_id = bdm["Ebs"]["VolumeId"]
-                          break
-                  if not vol_id:
-                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
-                  tags = [{"Key": "Name", "Value": desc[:255]}]
-                  if parent:
-                      tags.append({"Key": "ParentStack", "Value": parent})
-                  nonce = (props.get("Nonce") or "")[:256]
-                  if nonce:
-                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
-                  snap = ec2.create_snapshot(
-                      VolumeId=vol_id,
-                      Description=desc,
-                      TagSpecifications=[
-                          {"ResourceType": "snapshot", "Tags": tags},
-                      ],
-                  )
-                  sid = snap["SnapshotId"]
-                  data = {"SnapshotId": sid, "VolumeId": vol_id}
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
-              except Exception as e:
-                  print(repr(e))
-                  cfnresponse.send(
-                      event,
-                      context,
-                      cfnresponse.FAILED,
-                      {"Error": str(e)[:2048]},
-                      event.get("PhysicalResourceId", "failed"),
-                  )
-
-  WordpressRootEbsSnapshot:
-    Type: Custom::WordpressRootEbsSnapshot
-    Condition: CreateSnapshotStack
-    Properties:
-      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
-      InstanceId: !Ref WordpressEC2FromLT
-      Description: !Sub 'wp-stage2-${AWS::StackName}-root'
-      Nonce: !Ref SnapshotNonce
-      ParentStackName: !Ref AWS::StackName
 
 Outputs:
   WordpressURL:
