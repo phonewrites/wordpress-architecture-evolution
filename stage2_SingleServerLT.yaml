@@ -1,6 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  WordPress application AWS architecture evolution - Stage 2 (Single EC2 instance using Launch Template).
+  WordPress application AWS architecture evolution - Stage 2
+  Standalone server using Launch Template
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI.
@@ -22,7 +23,8 @@ Parameters:
       v then a positive integer (v1, v2, v3, …).
     MaxLength: 16
     Description: >-
-      When EnableSnapshotStack is true, bump during stack update to force a new snapshot (e.g. v1 to v2). Must match v + integer.
+      When setting EnableSnapshotStack to true, bump this during stack update to label a new version (e.g. v1 to v2);
+      Must match v + integer.
   CfnMetadataNonce:
     Type: Number
     Default: 1
@@ -34,18 +36,16 @@ Parameters:
     Type: String
     Default: ''
     AllowedPattern: '^$|^snap-[a-z0-9]+$'
-    ConstraintDescription: Empty or snap-… (lowercase hex).
+    ConstraintDescription: Empty or snap-... (lowercase hex).
     Description: >-
-      Optional. Pass the root EBS snapshot id (snap-…) at update-stack to boot from that disk
-      (e.g. the last WordpressRootSnapshotId output from stage1a/1b). When set, WordpressEC2FromLT uses
-      WordpressLT (restore from snapshot) instead of FreshWordpressLT so
-      LaunchTemplateId changes and EC2 does not try to change root snapshot in place. Leave empty
-      for a fresh AMI root and full bootstrap. When set, the template registers a private AMI from that snapshot
-      (Lambda custom resource) and boots WordpressLT from that AMI so EC2 never merges snapshot + another AMI root.
+      Empty: new AMI and full WordPress install (greenfield stage2 stack).
+      Non-empty: root EBS snapshot id (e.g. WordpressRootSnapshotId from stage1 with EnableSnapshotStack);
+      Keeps the on-disk site on stack update from stage1 to stage2, or starts a new stack from an existing compatible snapshot.
 
 Conditions:
   CreateSnapshotStack: !Equals [!Ref EnableSnapshotStack, 'true']
   HasRestoreSnapshot: !Not [!Equals [!Ref RestoreRootSnapshotId, '']]
+  UseFreshAmiRoot: !Not [!Condition HasRestoreSnapshot]
 
 Resources:
 
@@ -192,7 +192,7 @@ Resources:
       Description: "Wordpress Endpoint Name"
       Type: String
       Value: "localhost"  #Stage 2: MariaDB runs locally on same EC2 instance
-#Refer to the .md file for instructions on creating the DBPassword SecureString parameter
+      #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
 # WordPress server launched from Launch Template
   SGWordpress:
@@ -234,6 +234,7 @@ Resources:
 
   FreshWordpressLT:
     Type: AWS::EC2::LaunchTemplate
+    Condition: UseFreshAmiRoot
     DependsOn:
       - DBName
       - DBUser    

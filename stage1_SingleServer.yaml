@@ -1,13 +1,40 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  WordPress application AWS architecture evolution - Stage 1 
-  Standalone EC2 instance with direct configuration
+  WordPress application AWS architecture evolution - Stage 1
+  Standalone server with direct configuration + stack-driven on-instance refresh + optional EBS snapshot
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI.
     #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
+  CfnMetadataNonce:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 2147483647
+    Description: >-
+      Positive integer; increase on update-stack so WordpressEC2 Metadata changes and cfn-hup re-runs cfn-init.
+  EnableSnapshotStack:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      When true, create in-template resources (Lambda + custom resource) to snapshot WordpressEC2 root EBS volume.
+      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in.
+  SnapshotNonce:
+    Type: String
+    Default: v1
+    AllowedPattern: '^v[1-9][0-9]*$'
+    ConstraintDescription: >-
+      v then a positive integer (v1, v2, v3, …).
+    MaxLength: 16
+    Description: >-
+      When setting EnableSnapshotStack to true, bump this during stack update to label a new version (e.g. v1 to v2);
+      Must match v + integer.
+
+Conditions:
+  CreateSnapshotStack: !Equals [!Ref EnableSnapshotStack, 'true']
 
 Resources:
 
@@ -154,7 +181,7 @@ Resources:
       Description: "Wordpress Endpoint Name"
       Type: String
       Value: "localhost"  #Stage 1: MariaDB runs locally on same EC2 instance
-  #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
+      #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
 # All-in-one server: Web server (Apache) + WordPress application + MariaDB
   SGWordpress:
@@ -192,6 +219,7 @@ Resources:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
 
   WordpressEC2:
     Type: AWS::EC2::Instance
@@ -199,6 +227,25 @@ Resources:
       - DBName
       - DBUser    
       - DBEndpoint
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          wordpress_always:
+            - sync_public_endpoint
+        sync_public_endpoint:
+          commands:
+            00_add_timestamp:
+              command: !Sub 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) cfn-init CfnMetadataNonce=${CfnMetadataNonce}" >> /var/log/cfn-wp-refresh.log'
+            01_wp_sync_public_ip:
+              command: |
+                TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                PUB=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+                if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
+                if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
+                cd /var/www/html
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+              cwd: /var/www/html
     CreationPolicy:
       ResourceSignal:
         Timeout: PT15M
@@ -212,6 +259,8 @@ Resources:
       Tags:
         - Key: Name
           Value: Wordpress-solo-built
+        - Key: CfnMetadataNonce
+          Value: !Sub '${CfnMetadataNonce}'
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
@@ -224,7 +273,7 @@ Resources:
           # Step 2 - Run system updates
           dnf -y --refresh upgrade
           # Step 3 - Install system software - including Web and DB
-          dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress mariadb1011-server
+          dnf install -y aws-cfn-bootstrap wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress mariadb1011-server
           # Step 4 - Web and DB Servers Online - and set to startup
           systemctl enable httpd mariadb
           systemctl start httpd mariadb
@@ -270,9 +319,130 @@ Resources:
           echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
           mysql -u root --password="$DBRootPassword" < /tmp/db.setup
           rm -f /tmp/db.setup
-          # Step 11 - Signal end of installation & configuration
+          # Step 11 - Use cfn-init + cfn-hup for stack-driven refresh on EC2 Metadata change
+          mkdir -p /etc/cfn/hooks.d
+          touch /var/log/cfn-wp-refresh.log
+          {
+            echo '[main]'
+            echo "stack=${AWS::StackId}"
+            echo "region=${AWS::Region}"
+            echo 'verbose=true'
+            echo 'interval=5'
+          } >/etc/cfn/cfn-hup.conf
+          {
+            echo '[cfn-auto-reloader-hook]'
+            echo 'triggers=post.update'
+            echo 'path=Resources.WordpressEC2.Metadata'
+            echo "action=/opt/aws/bin/cfn-init -v -c wordpress_always --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}"
+          } >/etc/cfn/hooks.d/cfn-auto-reloader.conf
+          /opt/aws/bin/cfn-init -v -c wordpress_always --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region} || echo "cfn-init non-zero exit" >> /var/log/cfn-wp-refresh.log
+          nohup /opt/aws/bin/cfn-hup >/var/log/cfn-hup.log 2>&1 &
+          # Step 12 - Signal end of installation & configuration via cfn-signal
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
-  #WordpressEC2 can be improved further with cfn scripts within this stage.
+
+
+# Optional in-template crash-consistent root EBS snapshot
+  SnapshotHelperRole:
+    Type: AWS::IAM::Role
+    Condition: CreateSnapshotStack
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshot
+                  - ec2:CreateTags
+                Resource: '*'
+
+  SnapshotHelperLambda:
+    Type: AWS::Lambda::Function
+    Condition: CreateSnapshotStack
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt SnapshotHelperRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.SUCCESS,
+                          {},
+                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
+                      )
+                      return
+                  props = event["ResourceProperties"]
+                  instance_id = props["InstanceId"]
+                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
+                  parent = (props.get("ParentStackName") or "")[:256]
+                  ec2 = boto3.client("ec2")
+                  di = ec2.describe_instances(InstanceIds=[instance_id])
+                  if not di.get("Reservations"):
+                      raise RuntimeError("Instance not found: %s" % instance_id)
+                  inst = di["Reservations"][0]["Instances"][0]
+                  root = inst["RootDeviceName"]
+                  vol_id = None
+                  for bdm in inst.get("BlockDeviceMappings", []):
+                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
+                          vol_id = bdm["Ebs"]["VolumeId"]
+                          break
+                  if not vol_id:
+                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
+                  tags = [{"Key": "Name", "Value": desc[:255]}]
+                  if parent:
+                      tags.append({"Key": "ParentStack", "Value": parent})
+                  nonce = (props.get("Nonce") or "")[:256]
+                  if nonce:
+                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
+                  snap = ec2.create_snapshot(
+                      VolumeId=vol_id,
+                      Description=desc,
+                      TagSpecifications=[
+                          {"ResourceType": "snapshot", "Tags": tags},
+                      ],
+                  )
+                  sid = snap["SnapshotId"]
+                  data = {"SnapshotId": sid, "VolumeId": vol_id}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      event.get("PhysicalResourceId", "failed"),
+                  )
+
+  WordpressRootEbsSnapshot:
+    Type: Custom::WordpressRootEbsSnapshot
+    Condition: CreateSnapshotStack
+    Properties:
+      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
+      InstanceId: !Ref WordpressEC2
+      Description: !Sub 'wp-stage1-${AWS::StackName}-root'
+      Nonce: !Ref SnapshotNonce
+      ParentStackName: !Ref AWS::StackName
 
 Outputs:
   WordpressURL:
@@ -285,3 +455,11 @@ Outputs:
       Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped. Start the instance before stack update.
       if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2.PublicIp
+  WordpressRootSnapshotId:
+    Condition: CreateSnapshotStack
+    Description: EBS snapshot ID of WordpressEC2 root volume (EnableSnapshotStack set to true).
+    Value: !GetAtt WordpressRootEbsSnapshot.SnapshotId
+  WordpressRootVolumeId:
+    Condition: CreateSnapshotStack
+    Description: Root EBS volume ID at time of snapshot.
+    Value: !GetAtt WordpressRootEbsSnapshot.VolumeId
