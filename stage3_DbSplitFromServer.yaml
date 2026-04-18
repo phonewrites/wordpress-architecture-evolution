@@ -4,10 +4,26 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: WordPress application AWS architecture evolution - Stage 3 (Single EC2 instance with separate RDS database)
 Parameters:
   LatestAmiId:
-    Description: Latest Amazon Linux 2023 AMI for the WordPress instance
+    Description: Latest Amazon Linux 2023 AMI.
     #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
+  WordpressDbDumpS3Bucket:
+    Type: String
+    Default: ''
+    Description: >-
+      Same-stack upgrade from stage 2: S3 bucket that holds a logical dump of the MariaDB database from the old instance
+      (mysqldump). Leave empty for a greenfield stage 3 stack. If set, WordpressDbDumpS3Key must also be set.
+  WordpressDbDumpS3Key:
+    Type: String
+    Default: ''
+    Description: >-
+      Object key for the dump inside WordpressDbDumpS3Bucket (plain .sql or .sql.gz). Used only when the bucket is non-empty.
+
+Conditions:
+  HasDbDumpMigration: !And
+    - !Not [!Equals [!Ref WordpressDbDumpS3Bucket, '']]
+    - !Not [!Equals [!Ref WordpressDbDumpS3Key, '']]
 
 Resources:
 # Network skeleton with Db subnets added for RDS resources (2 tiers: Public/App + Db)
@@ -28,7 +44,8 @@ Resources:
       AvailabilityZone: !Select [ 0, !GetAZs '' ]
       CidrBlock: 10.125.0.0/20
       MapPublicIpOnLaunch: true
-      Ipv6CidrBlock: 
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock:
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
           - SubnetPart: '00::/64'
@@ -44,7 +61,8 @@ Resources:
       AvailabilityZone: !Select [ 1, !GetAZs '' ]
       CidrBlock: 10.125.16.0/20
       MapPublicIpOnLaunch: true
-      Ipv6CidrBlock: 
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock:
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
           - SubnetPart: '01::/64'
@@ -60,7 +78,8 @@ Resources:
       AvailabilityZone: !Select [ 2, !GetAZs '' ]
       CidrBlock: 10.125.32.0/20
       MapPublicIpOnLaunch: true
-      Ipv6CidrBlock: 
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock:
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
           - SubnetPart: '02::/64'
@@ -175,80 +194,6 @@ Resources:
       SubnetId: !Ref SubnetPublicC
       RouteTableId:
         Ref: RTPublic
-  IPv6WorkaroundSubnetPublicA:
-    Type: Custom::SubnetModify
-    Properties:
-      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
-      SubnetId: !Ref SubnetPublicA
-  IPv6WorkaroundSubnetPublicB:
-    Type: Custom::SubnetModify
-    Properties:
-      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
-      SubnetId: !Ref SubnetPublicB
-  IPv6WorkaroundSubnetPublicC:
-    Type: Custom::SubnetModify
-    Properties:
-      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
-      SubnetId: !Ref SubnetPublicC
-  IPv6WorkaroundRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal:
-            Service:
-            - lambda.amazonaws.com
-          Action:
-          - sts:AssumeRole
-      Path: "/"
-      Policies:
-        - PolicyName: !Sub "ipv6-fix-logs-${AWS::StackName}"
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-            - Effect: Allow
-              Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-              Resource: arn:aws:logs:*:*:*
-        - PolicyName: !Sub "ipv6-fix-modify-${AWS::StackName}"
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-            - Effect: Allow
-              Action:
-              - ec2:ModifySubnetAttribute
-              Resource: "*"
-  IPv6WorkaroundLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: "index.lambda_handler"
-      Code: #cfnresponse import required to send response back to CloudFormation
-        ZipFile:
-          Fn::Sub: |
-            import cfnresponse
-            import boto3
-
-            def lambda_handler(event, context):
-                if event['RequestType'] is 'Delete':
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS)
-                  return
-
-                responseValue = event['ResourceProperties']['SubnetId']
-                ec2 = boto3.client('ec2', region_name='${AWS::Region}')
-                ec2.modify_subnet_attribute(AssignIpv6AddressOnCreation={
-                                                'Value': True
-                                              },
-                                              SubnetId=responseValue)
-                responseData = {}
-                responseData['SubnetId'] = responseValue
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
-      Runtime: python3.9
-      Role: !GetAtt IPv6WorkaroundRole.Arn
-      Timeout: 30
 
 # SSM Parameters for WordPress configuration
   DBName:
@@ -323,7 +268,19 @@ Resources:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-        
+      Policies:
+        - PolicyName: !Sub wordpress-db-dump-s3-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !If
+                  - HasDbDumpMigration
+                  - !Sub 'arn:aws:s3:::${WordpressDbDumpS3Bucket}/${WordpressDbDumpS3Key}'
+                  - !Sub 'arn:aws:s3:::__wordpress_stage3_no_migration__/${AWS::StackName}-placeholder'
+
  #Launch template modified to run app only, without local database
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -332,8 +289,8 @@ Resources:
       - DBUser    
       - DBEndpoint
     Properties:
-      LaunchTemplateName: "Wordpress"
-      VersionDescription: "Launches instance with app only"
+      LaunchTemplateName: !Sub '${AWS::StackName}-wordpress-stage3-app'
+      VersionDescription: Launches WordPress app tier only (RDS for database); name is stack-scoped to avoid clashing with stage 2 LT name Wordpress on same-stack update
       LaunchTemplateData: 
         ImageId: !Ref LatestAmiId
         InstanceType: t2.micro
@@ -344,9 +301,15 @@ Resources:
         DisableApiTermination: true
         CreditSpecification:
           CpuCredits: Standard
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
+            M_BKT='${WordpressDbDumpS3Bucket}'
+            M_KEY='${WordpressDbDumpS3Key}'
             # Step 1 - Import parameter store values
             DBName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBName --query Parameters[0].Value --output text)
             DBUser=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBUser --query Parameters[0].Value --output text)
@@ -355,8 +318,8 @@ Resources:
             # Step 2 - System Updates
             dnf -y update
             dnf -y upgrade
-            # Step 3 - Install system software - Web server only (no local database)
-            dnf install wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress -y
+            # Step 3 - Install system software - Web server + MySQL client (optional RDS import from stage 2 via S3)
+            dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress mariadb1011-client-utils
             # Step 4 - Web Server Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
@@ -373,14 +336,50 @@ Resources:
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
             sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
-            # Step 7 - Fix the permissions
-            usermod -a -G apache ec2-user   
+            # Step 6b - Browser hostname for redirects when public DNS/IP changes
+            if ! grep -q 'Follow browser hostname for WP_HOME' wp-config.php; then
+              WPCONFIG_INSERT_TMP=$(mktemp)
+              WPCONFIG_MERGED_TMP=$(mktemp)
+              cat > "$WPCONFIG_INSERT_TMP" <<'WPCONFIG_BROWSER_HOST_SNIPPET'
+            /* Follow browser hostname for WP_HOME and WP_SITEURL (HTTP_HOST; no fixed public IP in redirects). */
+            if (php_sapi_name() !== 'cli' && !empty($_SERVER['HTTP_HOST'])) {
+                define('WP_HOME', 'http://' . $_SERVER['HTTP_HOST']);
+                define('WP_SITEURL', 'http://' . $_SERVER['HTTP_HOST']);
+            }
+            WPCONFIG_BROWSER_HOST_SNIPPET
+              awk 'NR==FNR { buf = buf $0 ORS; next } /stop editing! Happy publishing/ && !done { printf "%s", buf; done=1 } { print }' "$WPCONFIG_INSERT_TMP" wp-config.php > "$WPCONFIG_MERGED_TMP"
+              mv "$WPCONFIG_MERGED_TMP" wp-config.php
+              rm -f "$WPCONFIG_INSERT_TMP"
+            fi
+            # Step 7 - Optional: import MariaDB dump from stage 2 (S3) into RDS
+            if [ -n "$M_BKT" ] && [ -n "$M_KEY" ]; then
+              echo "Waiting for RDS to accept connections on $DBEndpoint ..."
+              for i in $(seq 1 90); do
+                if mysqladmin ping -h"$DBEndpoint" -u"$DBUser" -p"$DBPassword" --connect-timeout=5 --silent 2>/dev/null; then
+                  echo "RDS is up."
+                  break
+                fi
+                sleep 10
+              done
+              DUMPF=/tmp/wp-migrate.dump
+              aws s3 cp "s3://$M_BKT/$M_KEY" "$DUMPF" --region ${AWS::Region}
+              if [[ "$M_KEY" == *.gz ]]; then
+                gunzip -c "$DUMPF" | mysql -h"$DBEndpoint" -u"$DBUser" -p"$DBPassword" "$DBName"
+              else
+                mysql -h"$DBEndpoint" -u"$DBUser" -p"$DBPassword" "$DBName" < "$DUMPF"
+              fi
+              rm -f "$DUMPF"
+            fi
+            # Step 8 - Fix the permissions
+            usermod -a -G apache ec2-user
             chown -R ec2-user:apache /var/www
             chmod 2775 /var/www
             find /var/www -type d -exec chmod 2775 {} \;
             find /var/www -type f -exec chmod 0664 {} \;
   WordpressEC2:
     Type: AWS::EC2::Instance
+    DependsOn:
+      - RDSinstance
     Properties:
       SubnetId: !Ref SubnetPublicA
       LaunchTemplate:
@@ -431,5 +430,12 @@ Resources:
 
 Outputs:
   WordpressURL:
-    Description: Access WordPress installation at this URL
-    Value: !Sub 'http://${WordpressEC2.PublicIp}'
+    Description: >-
+      http:// + instance public DNS when running. Uses PublicDnsName so stack updates still work if the instance is stopped
+      (URL may show as http:// until you start the instance again; use WordpressInstanceAutoIP when the instance is running).
+    Value: !Sub 'http://${WordpressEC2.PublicDnsName}'
+  WordpressInstanceAutoIP:
+    Description: >-
+      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped. Start the instance before stack update.
+      if CloudFormation fails resolving this output.
+    Value: !GetAtt WordpressEC2.PublicIp
