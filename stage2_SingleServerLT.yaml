@@ -12,8 +12,8 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >-
-      When true, create in-template resources (Lambda + custom resource) to snapshot WordpressEC2FromLT root EBS volume.
-      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in. No separate S3 template required.
+      When true, create in-template resources (Lambda + custom resource) to snapshot WordpressEC2 root EBS volume.
+      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in.
   SnapshotNonce:
     Type: String
     Default: v1
@@ -254,6 +254,10 @@ Resources:
         DisableApiTermination: false
         CreditSpecification:
           CpuCredits: Standard
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
@@ -514,6 +518,10 @@ Resources:
         DisableApiTermination: false
         CreditSpecification:
           CpuCredits: Standard
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe

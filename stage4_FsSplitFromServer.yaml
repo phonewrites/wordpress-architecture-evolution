@@ -416,6 +416,10 @@ Resources:
         DisableApiTermination: true
         CreditSpecification:
           CpuCredits: Standard
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe

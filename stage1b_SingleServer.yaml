@@ -14,7 +14,7 @@ Parameters:
     AllowedValues: ['true', 'false']
     Description: >-
       When true, create in-template resources (Lambda + custom resource) to snapshot WordpressEC2 root EBS volume.
-      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in. No separate S3 template required.
+      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in.
   SnapshotNonce:
     Type: String
     Default: v1
