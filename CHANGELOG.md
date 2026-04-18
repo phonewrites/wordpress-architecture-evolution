@@ -2,6 +2,18 @@
 
 All notable changes are documented here following [Keep a Changelog](https://keepachangelog.com/) conventions.
 
+## [April 2026]
+
+### Added
+- `update-stack` path from stage1 → stage1a → stage1b → stage2 (Launch Template)
+
+### Changed
+- **Stage 2**: Launch template **logical IDs** **`FreshWordpressLT`** / **`WordpressLT`**; EC2 instance **`WordpressEC2FromLT`** (was **`WordpressServer`** / **`WordpressEC2`** in earlier revisions) for 1b→2 replace without **`snapshotId cannot be modified on root device`**.
+- **Stage 2**: **`DisableApiTermination: false`** on both launch templates and on the instance; **`WordpressEC2FromLT`** picks **`FreshWordpressLT`** vs **`WordpressLT`** with **`!If`**. Restore LT **`LaunchTemplateName`** embeds **`RestoreRootSnapshotId`** (optional for 1b→2 alone; keeps snap-A→snap-B updates safe).
+- **Stage 2**: Continuation of **Stage 1b**—same snapshot + `CfnMetadataNonce` / Init / **cfn-init** + **cfn-hup**; **`RestoreRootSnapshotId`** optional **`snap-…`** at update-stack for root restore (no extra lookup custom resource); boots `/dev/xvda` from snapshot when set.
+- **Stage 2**: Public subnets use **native dual-stack IPv6** (`AssignIpv6AddressOnCreation`) like Stage 1 / 1b and removed **IPv6Workaround** Lambda + custom resources so `update-stack` from Stage 1b matches networking without extra CRs
+- **Stage 2**: Launch Template UserData aligned with Stage 1 bootstrap (**MariaDB 10.11**, `dnf --refresh upgrade`, quoted DB passwords, **aws-cfn-bootstrap** + **cfn-signal**, **CreationPolicy** on **`WordpressEC2FromLT`**); default AMI SSM path uses **kernel 6.18** to match Stage 1 / 1b
+
 ## [January 2026]
 
 ### Added
