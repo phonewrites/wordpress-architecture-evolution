@@ -4,7 +4,7 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: WordPress application AWS architecture evolution - Stage 3 (Single EC2 instance with separate RDS database)
 Parameters:
   LatestAmiId:
-    Description: Latest Amazon Linux 2023 AMI for the WordPress instance
+    Description: Latest Amazon Linux 2023 AMI.
     #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
@@ -233,8 +233,8 @@ Resources:
             import boto3
 
             def lambda_handler(event, context):
-                if event['RequestType'] is 'Delete':
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS)
+                if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, event.get('PhysicalResourceId', 'delete'))
                   return
 
                 responseValue = event['ResourceProperties']['SubnetId']
@@ -344,6 +344,10 @@ Resources:
         DisableApiTermination: true
         CreditSpecification:
           CpuCredits: Standard
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash -xe
@@ -431,5 +435,12 @@ Resources:
 
 Outputs:
   WordpressURL:
-    Description: Access WordPress installation at this URL
-    Value: !Sub 'http://${WordpressEC2.PublicIp}'
+    Description: >-
+      http:// + instance public DNS when running. Uses PublicDnsName so stack updates still work if the instance is stopped
+      (URL may show as http:// until you start the instance again; use WordpressInstanceAutoIP when the instance is running).
+    Value: !Sub 'http://${WordpressEC2.PublicDnsName}'
+  WordpressInstanceAutoIP:
+    Description: >-
+      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped. Start the instance before stack update.
+      if CloudFormation fails resolving this output.
+    Value: !GetAtt WordpressEC2.PublicIp
