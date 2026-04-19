@@ -1,29 +1,50 @@
 # IMPORTANT: Refer to the .md file for instructions on creating the DBPassword
 # SecureString parameter manually before deploying this template.
 AWSTemplateFormatVersion: 2010-09-09
-Description: WordPress application AWS architecture evolution - Stage 3 (Single EC2 instance with separate RDS database)
+Description: >-
+  WordPress application AWS architecture evolution - Stage 3
+  Application server with separate RDS database
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI.
     #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
-  WordpressDbDumpS3Bucket:
+  MigrateFromStage2LocalMariaDb:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      true: Allows same stack upgrade from stage 2: run mysqldump on the existing WordPress EC2 (local MariaDB) and import into RDS via SSM
+      RunCommand, then stop MariaDB and point wp-config at RDS.
+      false: greenfield deployment.
+  SourceWordpressInstanceId:
     Type: String
     Default: ''
+    AllowedPattern: '^$|^i-[a-f0-9]+$'
+    ConstraintDescription: Empty or an EC2 instance id (i- followed by lowercase hex).
     Description: >-
-      Same-stack upgrade from stage 2: S3 bucket that holds a logical dump of the MariaDB database from the old instance
-      (mysqldump). Leave empty for a greenfield stage 3 stack. If set, WordpressDbDumpS3Key must also be set.
-  WordpressDbDumpS3Key:
-    Type: String
-    Default: ''
+      Enter the stage 2 WordpressInstanceId output from last stack create/update; Ignored if MigrateFromStage2LocalMariaDb is false
+  CfnMetadataNonce:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 2147483647
     Description: >-
-      Object key for the dump inside WordpressDbDumpS3Bucket (plain .sql or .sql.gz). Used only when the bucket is non-empty.
+      Positive integer; increase on update-stack so WordpressEC2 Metadata changes and cfn-hup re-runs cfn-init.
+
+Rules:
+  InstanceIdRequiredWhenMigrate:
+    RuleCondition: !Equals [!Ref MigrateFromStage2LocalMariaDb, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref SourceWordpressInstanceId, '']]
+        AssertDescription: >-
+          Set SourceWordpressInstanceId to the running stage 2 WordPress EC2 instance id when MigrateFromStage2LocalMariaDb is true.
 
 Conditions:
-  HasDbDumpMigration: !And
-    - !Not [!Equals [!Ref WordpressDbDumpS3Bucket, '']]
-    - !Not [!Equals [!Ref WordpressDbDumpS3Key, '']]
+  RunLocalMariaToRdsMigration: !And
+    - !Equals [!Ref MigrateFromStage2LocalMariaDb, 'true']
+    - !Not [!Equals [!Ref SourceWordpressInstanceId, '']]
 
 Resources:
 # Network skeleton with Db subnets added for RDS resources (2 tiers: Public/App + Db)
@@ -268,20 +289,18 @@ Resources:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
       Policies:
-        - PolicyName: !Sub wordpress-db-dump-s3-${AWS::StackName}
+        - PolicyName: cfn-signal
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action:
-                  - s3:GetObject
-                Resource: !If
-                  - HasDbDumpMigration
-                  - !Sub 'arn:aws:s3:::${WordpressDbDumpS3Bucket}/${WordpressDbDumpS3Key}'
-                  - !Sub 'arn:aws:s3:::__wordpress_stage3_no_migration__/${AWS::StackName}-placeholder'
+                Action: cloudformation:SignalResource
+                Resource: !Sub
+                  'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
 
- #Launch template modified to run app only, without local database
+  # Launch template: app tier only; name includes WordpressLT, scoped by stack (per-region name uniqueness in EC2)
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -289,8 +308,8 @@ Resources:
       - DBUser    
       - DBEndpoint
     Properties:
-      LaunchTemplateName: !Sub '${AWS::StackName}-wordpress-stage3-app'
-      VersionDescription: Launches WordPress app tier only (RDS for database); name is stack-scoped to avoid clashing with stage 2 LT name Wordpress on same-stack update
+      LaunchTemplateName: "Wordpress-app-only"
+      VersionDescription: Launches WordPress app tier only (RDS for database)
       LaunchTemplateData: 
         ImageId: !Ref LatestAmiId
         InstanceType: t2.micro
@@ -307,9 +326,18 @@ Resources:
           HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
-            #!/bin/bash -xe
-            M_BKT='${WordpressDbDumpS3Bucket}'
-            M_KEY='${WordpressDbDumpS3Key}'
+            #!/bin/bash
+            if ! [ -x /opt/aws/bin/cfn-signal ]; then
+              dnf -y install aws-cfn-bootstrap
+            fi
+            _cfn_exit() {
+              local s=$?
+              if [ -x /opt/aws/bin/cfn-signal ]; then
+                /opt/aws/bin/cfn-signal -e "$s" --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
+              fi
+            }
+            trap _cfn_exit EXIT
+            set -xe
             # Step 1 - Import parameter store values
             DBName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBName --query Parameters[0].Value --output text)
             DBUser=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBUser --query Parameters[0].Value --output text)
@@ -318,8 +346,8 @@ Resources:
             # Step 2 - System Updates
             dnf -y update
             dnf -y upgrade
-            # Step 3 - Install system software - Web server + MySQL client (optional RDS import from stage 2 via S3)
-            dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress mariadb1011-client-utils
+            # Step 3 - Install system software - Web server only (no local database)
+            dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress
             # Step 4 - Web Server Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
@@ -336,7 +364,7 @@ Resources:
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
             sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
-            # Step 6b - Browser hostname for redirects when public DNS/IP changes
+            # Step 7 - Use the browser address for Wordpress site links
             if ! grep -q 'Follow browser hostname for WP_HOME' wp-config.php; then
               WPCONFIG_INSERT_TMP=$(mktemp)
               WPCONFIG_MERGED_TMP=$(mktemp)
@@ -351,35 +379,57 @@ Resources:
               mv "$WPCONFIG_MERGED_TMP" wp-config.php
               rm -f "$WPCONFIG_INSERT_TMP"
             fi
-            # Step 7 - Optional: import MariaDB dump from stage 2 (S3) into RDS
-            if [ -n "$M_BKT" ] && [ -n "$M_KEY" ]; then
-              echo "Waiting for RDS to accept connections on $DBEndpoint ..."
-              for i in $(seq 1 90); do
-                if mysqladmin ping -h"$DBEndpoint" -u"$DBUser" -p"$DBPassword" --connect-timeout=5 --silent 2>/dev/null; then
-                  echo "RDS is up."
-                  break
-                fi
-                sleep 10
-              done
-              DUMPF=/tmp/wp-migrate.dump
-              aws s3 cp "s3://$M_BKT/$M_KEY" "$DUMPF" --region ${AWS::Region}
-              if [[ "$M_KEY" == *.gz ]]; then
-                gunzip -c "$DUMPF" | mysql -h"$DBEndpoint" -u"$DBUser" -p"$DBPassword" "$DBName"
-              else
-                mysql -h"$DBEndpoint" -u"$DBUser" -p"$DBPassword" "$DBName" < "$DUMPF"
-              fi
-              rm -f "$DUMPF"
-            fi
             # Step 8 - Fix the permissions
             usermod -a -G apache ec2-user
             chown -R ec2-user:apache /var/www
             chmod 2775 /var/www
             find /var/www -type d -exec chmod 2775 {} \;
             find /var/www -type f -exec chmod 0664 {} \;
+            # Step 9 - cfn-init + cfn-hup for stack-driven refresh on WordpressEC2 Metadata (parity with stage 2)
+            mkdir -p /etc/cfn/hooks.d
+            touch /var/log/cfn-wp-refresh.log
+            {
+              echo '[main]'
+              echo "stack=${AWS::StackId}"
+              echo "region=${AWS::Region}"
+              echo 'verbose=true'
+              echo 'interval=5'
+            } >/etc/cfn/cfn-hup.conf
+            {
+              echo '[cfn-auto-reloader-hook]'
+              echo 'triggers=post.update'
+              echo 'path=Resources.WordpressEC2.Metadata'
+              echo "action=/opt/aws/bin/cfn-init -v -c wordpress_always --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}"
+            } >/etc/cfn/hooks.d/cfn-auto-reloader.conf
+            /opt/aws/bin/cfn-init -v -c wordpress_always --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region} || echo "cfn-init non-zero exit" >> /var/log/cfn-wp-refresh.log
+            nohup /opt/aws/bin/cfn-hup >/var/log/cfn-hup.log 2>&1 &
   WordpressEC2:
     Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          wordpress_always:
+            - sync_public_endpoint
+        sync_public_endpoint:
+          commands:
+            00_add_timestamp:
+              command: !Sub 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) cfn-init CfnMetadataNonce=${CfnMetadataNonce}" >> /var/log/cfn-wp-refresh.log'
+            01_wp_sync_public_ip:
+              command: |
+                TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                PUB=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+                if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
+                if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
+                cd /var/www/html
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+              cwd: /var/www/html
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
     DependsOn:
       - RDSinstance
+      - LocalMariaDbToRdsMigration
     Properties:
       SubnetId: !Ref SubnetPublicA
       LaunchTemplate:
@@ -387,9 +437,9 @@ Resources:
         Version: !GetAtt WordpressLaunchTemplate.LatestVersionNumber
       Tags:
         - Key: Name
-          Value: Wordpress-LT-Db-Split
-  #WordpressEC2 can be improved further with cfn scripts within this stage.
-
+          Value: Wordpress-LT-built-Db-split
+        - Key: CfnMetadataNonce
+          Value: !Sub '${CfnMetadataNonce}'
 # RDS resources needed to split Database from WordpressEC2
   RDSSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -428,6 +478,136 @@ Resources:
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
   #RDSinstance can be improved further with RDS proxy within this stage
 
+
+# Optional resources for stack update from stage2 to stage3
+  RdsLocalMariaMigrateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub rds-migrate-ssm-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+
+  RdsLocalMariaMigrateLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt RdsLocalMariaMigrateRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+          import time
+
+          def handler(event, context):
+              phys = event.get("PhysicalResourceId") or "rds-migrate"
+              try:
+                  if event["RequestType"] == "Delete":
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, phys)
+                      return
+                  props = event["ResourceProperties"]
+                  if str(props.get("EnableMigration", "false")).lower() != "true":
+                      cfnresponse.send(
+                          event, context, cfnresponse.SUCCESS, {"Skipped": "true"}, phys + "-skip"
+                      )
+                      return
+                  region = props["Region"]
+                  inst = (props.get("SourceInstanceId") or "").strip()
+                  if not inst.startswith("i-"):
+                      raise ValueError("SourceInstanceId must be an EC2 instance id")
+                  rds_host = (props.get("RdsAddress") or "").strip()
+                  if not rds_host:
+                      raise ValueError("RdsAddress empty")
+                  rds_port = str(props.get("RdsPort") or "3306")
+                  lines = [
+                      "#!/bin/bash",
+                      "set -euo pipefail",
+                      "REGION=" + repr(region),
+                      "RDS_ENDPOINT=" + repr(rds_host),
+                      "RDS_PORT=" + repr(rds_port),
+                      "DUMP=/tmp/cfn-wp-rds-migrate.sql",
+                      'DBName=$(aws ssm get-parameters --region "$REGION" --names /Wordpress/DBName --query Parameters[0].Value --output text)',
+                      'DBUser=$(aws ssm get-parameters --region "$REGION" --names /Wordpress/DBUser --query Parameters[0].Value --output text)',
+                      'DBPassword=$(aws ssm get-parameters --region "$REGION" --names /Wordpress/DBPassword --with-decryption --query Parameters[0].Value --output text)',
+                      'mysqldump -h127.0.0.1 -u"$DBUser" -p"$DBPassword" "$DBName" > "$DUMP"',
+                      'mysql -h"$RDS_ENDPOINT" -P"$RDS_PORT" -u"$DBUser" -p"$DBPassword" "$DBName" < "$DUMP"',
+                      'rm -f "$DUMP"',
+                      "systemctl disable mariadb 2>/dev/null || true",
+                      "systemctl stop mariadb 2>/dev/null || true",
+                      'if [ -f /var/www/html/wp-config.php ]; then',
+                      '  sed -i "s/\'localhost\'/\'${RDS_ENDPOINT}\'/g" /var/www/html/wp-config.php || true',
+                      '  sed -i "s/\'127.0.0.1\'/\'${RDS_ENDPOINT}\'/g" /var/www/html/wp-config.php || true',
+                      "fi",
+                  ]
+                  script = "\n".join(lines) + "\n"
+                  ssm = boto3.client("ssm", region_name=region)
+                  resp = ssm.send_command(
+                      InstanceIds=[inst],
+                      DocumentName="AWS-RunShellScript",
+                      Parameters={"commands": [script]},
+                      TimeoutSeconds=600,
+                  )
+                  cid = resp["Command"]["CommandId"]
+                  for _ in range(150):
+                      time.sleep(4)
+                      inv = ssm.get_command_invocation(CommandId=cid, InstanceId=inst)
+                      st = inv["Status"]
+                      if st in ("Success", "Cancelled", "Failed", "TimedOut", "Cancelling"):
+                          break
+                  else:
+                      raise TimeoutError("SSM command timed out")
+                  inv = ssm.get_command_invocation(CommandId=cid, InstanceId=inst)
+                  if inv["Status"] != "Success":
+                      err = (inv.get("StandardErrorContent") or "")[:4096]
+                      raise RuntimeError(err or inv["Status"])
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.SUCCESS,
+                      {"InstanceId": inst, "CommandId": cid},
+                      inst + "-" + cid,
+                  )
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      phys,
+                  )
+
+  LocalMariaDbToRdsMigration:
+    Type: Custom::LocalMariaDbToRdsMigration
+    DependsOn: RDSinstance
+    Properties:
+      ServiceToken: !GetAtt RdsLocalMariaMigrateLambda.Arn
+      EnableMigration: !If [RunLocalMariaToRdsMigration, 'true', 'false']
+      SourceInstanceId: !Ref SourceWordpressInstanceId
+      RdsAddress: !GetAtt RDSinstance.Endpoint.Address
+      RdsPort: !GetAtt RDSinstance.Endpoint.Port
+      Region: !Ref AWS::Region
+
+
+
 Outputs:
   WordpressURL:
     Description: >-
@@ -436,6 +616,6 @@ Outputs:
     Value: !Sub 'http://${WordpressEC2.PublicDnsName}'
   WordpressInstanceAutoIP:
     Description: >-
-      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped. Start the instance before stack update.
-      if CloudFormation fails resolving this output.
+      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped.
+      Start the instance before stack update if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2.PublicIp

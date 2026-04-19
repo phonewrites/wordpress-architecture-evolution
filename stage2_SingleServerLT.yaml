@@ -557,7 +557,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt RestoreRootAmiLambda.Arn
       SnapshotId: !Ref RestoreRootSnapshotId
-      AmiName: !Sub '${AWS::StackName}-wp-root-${RestoreRootSnapshotId}'
+      AmiName: !Sub 'Wordpress-ami-from-${RestoreRootSnapshotId}'
       RootDeviceName: /dev/xvda
 
 # WordPress server Launch Template for stack update from stage1 to stage2 
@@ -716,8 +716,41 @@ Resources:
                 if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
                 if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
                 cd /var/www/html
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                NEW_PUBLIC_SITE_URL="http://$PUB"
+                PREVIOUS_HOME_URL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get home 2>/dev/null || true)
+                PREVIOUS_SITEURL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get siteurl 2>/dev/null || true)
+                wp_search_replace_if_changed() {
+                  _from="$1"
+                  _to="$2"
+                  if [ -n "$_from" ] && [ "$_from" != "$_to" ]; then
+                    php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root search-replace "$_from" "$_to" --all-tables >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                  fi
+                }
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                # After snapshot restore, DB options move to the new IP but post_content (and serialized data) can still reference the old base URL. Also cover common EC2 public-DNS vs raw-IPv4 mismatches for the same instance generation.
+                wp_search_replace_if_changed "$PREVIOUS_HOME_URL" "$NEW_PUBLIC_SITE_URL"
+                wp_search_replace_if_changed "$PREVIOUS_SITEURL" "$NEW_PUBLIC_SITE_URL"
+                PREVIOUS_HOME_HOST=$(echo "$PREVIOUS_HOME_URL" | sed 's|^[^/]*//||;s|/.*||')
+                if echo "$PREVIOUS_HOME_HOST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+                  DASH_IPV4=$(echo "$PREVIOUS_HOME_HOST" | tr '.' '-')
+                  INSTANCE_IDENTITY=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null || true)
+                  INSTANCE_REGION=$(echo "$INSTANCE_IDENTITY" | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  if [ -n "$DASH_IPV4" ] && [ -n "$INSTANCE_REGION" ]; then
+                    wp_search_replace_if_changed "http://ec2-${DASH_IPV4}.${INSTANCE_REGION}.compute.amazonaws.com" "$NEW_PUBLIC_SITE_URL"
+                    if [ "$INSTANCE_REGION" = "us-east-1" ]; then
+                      wp_search_replace_if_changed "http://ec2-${DASH_IPV4}.compute-1.amazonaws.com" "$NEW_PUBLIC_SITE_URL"
+                    fi
+                  fi
+                elif echo "$PREVIOUS_HOME_HOST" | grep -qE '^ec2-[0-9-]+\.'; then
+                  OCTET_CORE=$(echo "$PREVIOUS_HOME_HOST" | sed 's/^ec2-\([0-9-]*\)\..*/\1/')
+                  if [ -n "$OCTET_CORE" ]; then
+                    PREVIOUS_IPV4_FROM_EC2_DNS=$(echo "$OCTET_CORE" | awk -F- 'NF>=4 {print $1"."$2"."$3"."$4}')
+                    if [ -n "$PREVIOUS_IPV4_FROM_EC2_DNS" ]; then
+                      wp_search_replace_if_changed "http://${PREVIOUS_IPV4_FROM_EC2_DNS}" "$NEW_PUBLIC_SITE_URL"
+                    fi
+                  fi
+                fi
               cwd: /var/www/html
     CreationPolicy:
       ResourceSignal:
@@ -799,3 +832,7 @@ Outputs:
     Condition: CreateSnapshotStack
     Description: Root EBS volume ID at time of snapshot.
     Value: !GetAtt WordpressRootEbsSnapshot.VolumeId
+  WordpressInstanceId:
+    Description: >-
+      EC2 instance id of WordpressEC2FromLT.
+    Value: !Ref WordpressEC2FromLT    
