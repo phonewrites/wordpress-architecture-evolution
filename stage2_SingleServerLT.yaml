@@ -31,7 +31,7 @@ Parameters:
     MinValue: 1
     MaxValue: 2147483647
     Description: >-
-      Positive integer; increase on update-stack so WordpressEC2FromLT Metadata changes and cfn-hup re-runs cfn-init.
+      Positive integer; increase on stack update so WordpressEC2FromLT Metadata changes and cfn-hup re-runs cfn-init.
   RestoreRootSnapshotId:
     Type: String
     Default: ''
@@ -570,7 +570,7 @@ Resources:
       - DBUser
       - DBEndpoint
     Properties:
-      LaunchTemplateName: !Sub '${AWS::StackName}-wordpress-restore-${RestoreRootSnapshotId}'
+      LaunchTemplateName: !Sub 'Wordpress-restored-from-${RestoreRootSnapshotId}'
       VersionDescription: Evolutionary / restore — root from RestoreRootSnapshotId (EBS snapshot boot)
       LaunchTemplateData:
         # AMI built from RestoreRootSnapshotId by RestoreRootRegisteredAmi (register_image). Avoids EC2 snapshotId
@@ -693,7 +693,7 @@ Resources:
             # Step 12 - Signal end of installation & configuration via cfn-signal
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2FromLT --region ${AWS::Region}
 
-# WordPress server launched from one of the above Launch Templates 
+# WordPress server launched from one of the Launch Templates above 
   WordpressEC2FromLT:
     Type: AWS::EC2::Instance
     DependsOn:
@@ -788,8 +788,8 @@ Outputs:
     Value: !Sub 'http://${WordpressEC2FromLT.PublicDnsName}'
   WordpressInstanceAutoIP:
     Description: >-
-      Ephemeral public IPv4 assigned to WordpressEC2FromLT while running. Absent when stopped. Start the instance before stack update.
-      if CloudFormation fails resolving this output.
+      Ephemeral public IPv4 assigned to WordpressEC2FromLT while running. Absent when stopped.
+      Start the instance before stack update if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2FromLT.PublicIp
   WordpressRootSnapshotId:
     Condition: CreateSnapshotStack

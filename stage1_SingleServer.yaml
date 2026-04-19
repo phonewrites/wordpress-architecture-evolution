@@ -454,8 +454,8 @@ Outputs:
     Value: !Sub 'http://${WordpressEC2.PublicDnsName}'
   WordpressInstanceAutoIP:
     Description: >-
-      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped. Start the instance before stack update.
-      if CloudFormation fails resolving this output.
+      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped.
+      Start the instance before stack update if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2.PublicIp
   WordpressRootSnapshotId:
     Condition: CreateSnapshotStack
