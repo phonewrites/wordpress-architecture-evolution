@@ -365,7 +365,7 @@ Resources:
         ZipFile: |
           import cfnresponse
           import boto3
-
+          # Describe the WordPress EC2 instance - find root EBS volume - create snapshot with tags - return snapshot id to CloudFormation.
           def handler(event, context):
               try:
                   if event["RequestType"] == "Delete":
@@ -426,7 +426,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt SnapshotHelperLambda.Arn
       InstanceId: !Ref WordpressEC2FromLT
-      Description: !Sub 'wp-stage2-${AWS::StackName}-root'
+      Description: !Sub 'wordpress-stage2-root-ebs-snapshot'
       Nonce: !Ref SnapshotNonce
       ParentStackName: !Ref AWS::StackName
 
@@ -471,7 +471,7 @@ Resources:
           import cfnresponse
           import boto3
           import time
-
+          # Register AMI from root snapshot on Create; deregister AMI on Delete; answer CloudFormation.
           def handler(event, context):
               ec2 = boto3.client("ec2")
               try:
@@ -711,45 +711,65 @@ Resources:
               command: !Sub 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) cfn-init CfnMetadataNonce=${CfnMetadataNonce}" >> /var/log/cfn-wp-refresh.log'
             01_wp_sync_public_ip:
               command: |
-                TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-                PUB=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
-                if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
+                # Read IMDS session token - public IPv4 - and public hostname for this instance.
+                # Set WordPress home and siteurl from hostname when present - otherwise from IPv4 - keep DB URLs aligned with how users open the site.
+                IMDS_SESSION_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                IMDS_PUBLIC_IPV4=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+                IMDS_PUBLIC_HOSTNAME=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-hostname 2>/dev/null || true)
+                if [ -z "$IMDS_PUBLIC_IPV4" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
                 if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
                 cd /var/www/html
-                NEW_PUBLIC_SITE_URL="http://$PUB"
+                if [ -n "$IMDS_PUBLIC_HOSTNAME" ]; then NEW_PUBLIC_SITE_URL="http://$IMDS_PUBLIC_HOSTNAME"; else NEW_PUBLIC_SITE_URL="http://$IMDS_PUBLIC_IPV4"; fi
                 PREVIOUS_HOME_URL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get home 2>/dev/null || true)
                 PREVIOUS_SITEURL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get siteurl 2>/dev/null || true)
+                if [ -z "$PREVIOUS_HOME_URL$PREVIOUS_SITEURL" ]; then echo "WARN 01_wp_sync_public_ip: empty home/siteurl from wp-cli; URL search-replace may miss" >> /var/log/cfn-wp-refresh.log; fi
                 wp_search_replace_if_changed() {
-                  _from="$1"
-                  _to="$2"
-                  if [ -n "$_from" ] && [ "$_from" != "$_to" ]; then
-                    php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root search-replace "$_from" "$_to" --all-tables >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                  SEARCH_REPLACE_OLD_VALUE="$1"
+                  SEARCH_REPLACE_NEW_VALUE="$2"
+                  if [ -n "$SEARCH_REPLACE_OLD_VALUE" ] && [ "$SEARCH_REPLACE_OLD_VALUE" != "$SEARCH_REPLACE_NEW_VALUE" ]; then
+                    php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root search-replace "$SEARCH_REPLACE_OLD_VALUE" "$SEARCH_REPLACE_NEW_VALUE" --all-tables >> /var/log/cfn-wp-refresh.log 2>&1 || true
                   fi
                 }
                 php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
                 php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
-                # After snapshot restore, DB options move to the new IP but post_content (and serialized data) can still reference the old base URL. Also cover common EC2 public-DNS vs raw-IPv4 mismatches for the same instance generation.
+                # Search-replace old home and siteurl through the database - cover trailing-slash variants - do not hand-escape JSON for wp-cli (avoids corrupting block editor JSON).
                 wp_search_replace_if_changed "$PREVIOUS_HOME_URL" "$NEW_PUBLIC_SITE_URL"
                 wp_search_replace_if_changed "$PREVIOUS_SITEURL" "$NEW_PUBLIC_SITE_URL"
+                for PREVIOUS_HOME_OR_SITEURL in "$PREVIOUS_HOME_URL" "$PREVIOUS_SITEURL"; do
+                  [ -z "$PREVIOUS_HOME_OR_SITEURL" ] && continue
+                  PREVIOUS_URL_WITHOUT_TRAILING_SLASHES=$(printf '%s' "$PREVIOUS_HOME_OR_SITEURL" | sed 's|/*$||')
+                  PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST="${PREVIOUS_URL_WITHOUT_TRAILING_SLASHES}/"
+                  wp_search_replace_if_changed "$PREVIOUS_URL_WITHOUT_TRAILING_SLASHES" "$NEW_PUBLIC_SITE_URL"
+                  wp_search_replace_if_changed "$PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST" "$NEW_PUBLIC_SITE_URL"
+                done
+                # Map dotted IPv4 home host to regional ec2-* DNS and legacy us-east-1 form - search-replace those URLs when they appear in content.
                 PREVIOUS_HOME_HOST=$(echo "$PREVIOUS_HOME_URL" | sed 's|^[^/]*//||;s|/.*||')
                 if echo "$PREVIOUS_HOME_HOST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                  DASH_IPV4=$(echo "$PREVIOUS_HOME_HOST" | tr '.' '-')
-                  INSTANCE_IDENTITY=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null || true)
-                  INSTANCE_REGION=$(echo "$INSTANCE_IDENTITY" | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-                  if [ -n "$DASH_IPV4" ] && [ -n "$INSTANCE_REGION" ]; then
-                    wp_search_replace_if_changed "http://ec2-${DASH_IPV4}.${INSTANCE_REGION}.compute.amazonaws.com" "$NEW_PUBLIC_SITE_URL"
-                    if [ "$INSTANCE_REGION" = "us-east-1" ]; then
-                      wp_search_replace_if_changed "http://ec2-${DASH_IPV4}.compute-1.amazonaws.com" "$NEW_PUBLIC_SITE_URL"
+                  PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL=$(echo "$PREVIOUS_HOME_HOST" | tr '.' '-')
+                  IMDS_INSTANCE_IDENTITY_DOCUMENT=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null || true)
+                  IMDS_INSTANCE_REGION=$(echo "$IMDS_INSTANCE_IDENTITY_DOCUMENT" | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  if [ -n "$PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL" ] && [ -n "$IMDS_INSTANCE_REGION" ]; then
+                    PREVIOUS_HOME_EC2_REGIONAL_PUBLIC_DNS_URL=$(printf 'http://ec2-%s.%s.compute.amazonaws.com' "$PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL" "$IMDS_INSTANCE_REGION")
+                    wp_search_replace_if_changed "$PREVIOUS_HOME_EC2_REGIONAL_PUBLIC_DNS_URL" "$NEW_PUBLIC_SITE_URL"
+                    if [ "$IMDS_INSTANCE_REGION" = "us-east-1" ]; then
+                      PREVIOUS_HOME_EC2_US_EAST_LEGACY_PUBLIC_DNS_URL=$(printf 'http://ec2-%s.compute-1.amazonaws.com' "$PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL")
+                      wp_search_replace_if_changed "$PREVIOUS_HOME_EC2_US_EAST_LEGACY_PUBLIC_DNS_URL" "$NEW_PUBLIC_SITE_URL"
                     fi
                   fi
+                # Map ec2-* DNS home host back to dotted IPv4 http URL - search-replace when content still references the IPv4 form.
                 elif echo "$PREVIOUS_HOME_HOST" | grep -qE '^ec2-[0-9-]+\.'; then
-                  OCTET_CORE=$(echo "$PREVIOUS_HOME_HOST" | sed 's/^ec2-\([0-9-]*\)\..*/\1/')
-                  if [ -n "$OCTET_CORE" ]; then
-                    PREVIOUS_IPV4_FROM_EC2_DNS=$(echo "$OCTET_CORE" | awk -F- 'NF>=4 {print $1"."$2"."$3"."$4}')
-                    if [ -n "$PREVIOUS_IPV4_FROM_EC2_DNS" ]; then
-                      wp_search_replace_if_changed "http://${PREVIOUS_IPV4_FROM_EC2_DNS}" "$NEW_PUBLIC_SITE_URL"
+                  PREVIOUS_HOME_EC2_DNS_IPV4_LABEL=$(echo "$PREVIOUS_HOME_HOST" | sed 's/^ec2-\([0-9-]*\)\..*/\1/')
+                  if [ -n "$PREVIOUS_HOME_EC2_DNS_IPV4_LABEL" ]; then
+                    PREVIOUS_HOME_IPV4_DOTTED_FROM_EC2_DNS_HOST=$(echo "$PREVIOUS_HOME_EC2_DNS_IPV4_LABEL" | awk -F- 'NF>=4 {print $1"."$2"."$3"."$4}')
+                    if [ -n "$PREVIOUS_HOME_IPV4_DOTTED_FROM_EC2_DNS_HOST" ]; then
+                      PREVIOUS_HOME_HTTP_DOTTED_IPV4_URL=$(printf 'http://%s' "$PREVIOUS_HOME_IPV4_DOTTED_FROM_EC2_DNS_HOST")
+                      wp_search_replace_if_changed "$PREVIOUS_HOME_HTTP_DOTTED_IPV4_URL" "$NEW_PUBLIC_SITE_URL"
                     fi
                   fi
+                fi
+                # When site URL uses hostname - replace leftover http://<ipv4> references in content with that hostname URL.
+                if [ -n "$IMDS_PUBLIC_HOSTNAME" ] && [ "$NEW_PUBLIC_SITE_URL" != "http://$IMDS_PUBLIC_IPV4" ]; then
+                  wp_search_replace_if_changed "http://$IMDS_PUBLIC_IPV4" "$NEW_PUBLIC_SITE_URL"
                 fi
               cwd: /var/www/html
     CreationPolicy:

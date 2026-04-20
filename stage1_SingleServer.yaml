@@ -201,13 +201,15 @@ Resources:
               command: !Sub 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) cfn-init CfnMetadataNonce=${CfnMetadataNonce}" >> /var/log/cfn-wp-refresh.log'
             01_wp_sync_public_ip:
               command: |
-                TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-                PUB=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
-                if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
+                # Read IMDS session token and public IPv4 for this instance.
+                # Update WordPress home and siteurl to http://<public-ipv4> - skip when no public IP.
+                IMDS_SESSION_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                IMDS_PUBLIC_IPV4=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+                if [ -z "$IMDS_PUBLIC_IPV4" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
                 if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
                 cd /var/www/html
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$IMDS_PUBLIC_IPV4" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$IMDS_PUBLIC_IPV4" >> /var/log/cfn-wp-refresh.log 2>&1 || true
               cwd: /var/www/html
     CreationPolicy:
       ResourceSignal:
@@ -341,7 +343,7 @@ Resources:
         ZipFile: |
           import cfnresponse
           import boto3
-
+          # Describe the WordPress EC2 instance - find root EBS volume - create snapshot with tags - return snapshot id to CloudFormation.
           def handler(event, context):
               try:
                   if event["RequestType"] == "Delete":
@@ -402,7 +404,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt SnapshotHelperLambda.Arn
       InstanceId: !Ref WordpressEC2
-      Description: !Sub 'wp-stage1-${AWS::StackName}-root'
+      Description: !Sub 'wordpress-stage1-root-ebs-snapshot'
       Nonce: !Ref SnapshotNonce
       ParentStackName: !Ref AWS::StackName
 
