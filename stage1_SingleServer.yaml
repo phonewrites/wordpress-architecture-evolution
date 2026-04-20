@@ -184,43 +184,6 @@ Resources:
       #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
 # All-in-one server: Web server (Apache) + WordPress application + MariaDB
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupName: wordpress-sg
-      GroupDescription: "Allow HTTP traffic to WordPress web server"
-      SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
-
   WordpressEC2:
     Type: AWS::EC2::Instance
     DependsOn:
@@ -238,13 +201,15 @@ Resources:
               command: !Sub 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) cfn-init CfnMetadataNonce=${CfnMetadataNonce}" >> /var/log/cfn-wp-refresh.log'
             01_wp_sync_public_ip:
               command: |
-                TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-                PUB=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
-                if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
+                # Read IMDS session token and public IPv4 for this instance.
+                # Update WordPress home and siteurl to http://<public-ipv4> - skip when no public IP.
+                IMDS_SESSION_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                IMDS_PUBLIC_IPV4=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+                if [ -z "$IMDS_PUBLIC_IPV4" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
                 if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
                 cd /var/www/html
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$IMDS_PUBLIC_IPV4" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$IMDS_PUBLIC_IPV4" >> /var/log/cfn-wp-refresh.log 2>&1 || true
               cwd: /var/www/html
     CreationPolicy:
       ResourceSignal:
@@ -340,8 +305,7 @@ Resources:
           # Step 12 - Signal end of installation & configuration via cfn-signal
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
 
-
-# Optional in-template crash-consistent root EBS snapshot
+# Optional resources for crash-consistent root EBS snapshot
   SnapshotHelperRole:
     Type: AWS::IAM::Role
     Condition: CreateSnapshotStack
@@ -379,7 +343,7 @@ Resources:
         ZipFile: |
           import cfnresponse
           import boto3
-
+          # Describe the WordPress EC2 instance - find root EBS volume - create snapshot with tags - return snapshot id to CloudFormation.
           def handler(event, context):
               try:
                   if event["RequestType"] == "Delete":
@@ -440,9 +404,49 @@ Resources:
     Properties:
       ServiceToken: !GetAtt SnapshotHelperLambda.Arn
       InstanceId: !Ref WordpressEC2
-      Description: !Sub 'wp-stage1-${AWS::StackName}-root'
+      Description: !Sub 'wordpress-stage1-root-ebs-snapshot'
       Nonce: !Ref SnapshotNonce
       ParentStackName: !Ref AWS::StackName
+
+# Other resources for WordPress server 
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: wordpress-sg
+      GroupDescription: "Allow HTTP traffic to WordPress web server"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
+
+
 
 Outputs:
   WordpressURL:
@@ -452,8 +456,8 @@ Outputs:
     Value: !Sub 'http://${WordpressEC2.PublicDnsName}'
   WordpressInstanceAutoIP:
     Description: >-
-      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped. Start the instance before stack update.
-      if CloudFormation fails resolving this output.
+      Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped.
+      Start the instance before stack update if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2.PublicIp
   WordpressRootSnapshotId:
     Condition: CreateSnapshotStack

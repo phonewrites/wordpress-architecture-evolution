@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
   WordPress application AWS architecture evolution - Stage 2
-  Standalone server using Launch Template
+  Standalone server using Launch Template + stack-driven on-instance refresh + optional EBS snapshot
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI.
@@ -31,7 +31,7 @@ Parameters:
     MinValue: 1
     MaxValue: 2147483647
     Description: >-
-      Positive integer; increase on update-stack so WordpressEC2FromLT Metadata changes and cfn-hup re-runs cfn-init.
+      Positive integer; increase on stack update so WordpressEC2FromLT Metadata changes and cfn-hup re-runs cfn-init.
   RestoreRootSnapshotId:
     Type: String
     Default: ''
@@ -194,44 +194,7 @@ Resources:
       Value: "localhost"  #Stage 2: MariaDB runs locally on same EC2 instance
       #Refer to the .md file for instructions on creating the DBPassword SecureString parameter
 
-# WordPress server launched from Launch Template
-  SGWordpress:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      VpcId: !Ref VPC
-      GroupName: wordpress-sg
-      GroupDescription: "Allow HTTP traffic to WordPress web server"
-      SecurityGroupIngress: 
-        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
-          IpProtocol: tcp
-          FromPort: '80'
-          ToPort: '80'
-          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
-  WordpressInstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
-    Properties:
-      Path: /
-      Roles:
-        - !Ref WordpressRole
-  WordpressRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-              - ec2.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Path: /
-      ManagedPolicyArns: 
-        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
-
+# WordPress server Launch Template for fresh WordPress install – greenfield stage2 stack 
   FreshWordpressLT:
     Type: AWS::EC2::LaunchTemplate
     Condition: UseFreshAmiRoot
@@ -364,6 +327,110 @@ Resources:
             # Step 12 - Signal end of installation & configuration via cfn-signal
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2FromLT --region ${AWS::Region}
 
+# Optional resources for crash-consistent root EBS snapshot
+  SnapshotHelperRole:
+    Type: AWS::IAM::Role
+    Condition: CreateSnapshotStack
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshot
+                  - ec2:CreateTags
+                Resource: '*'
+
+  SnapshotHelperLambda:
+    Type: AWS::Lambda::Function
+    Condition: CreateSnapshotStack
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt SnapshotHelperRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+          # Describe the WordPress EC2 instance - find root EBS volume - create snapshot with tags - return snapshot id to CloudFormation.
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.SUCCESS,
+                          {},
+                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
+                      )
+                      return
+                  props = event["ResourceProperties"]
+                  instance_id = props["InstanceId"]
+                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
+                  parent = (props.get("ParentStackName") or "")[:256]
+                  ec2 = boto3.client("ec2")
+                  di = ec2.describe_instances(InstanceIds=[instance_id])
+                  if not di.get("Reservations"):
+                      raise RuntimeError("Instance not found: %s" % instance_id)
+                  inst = di["Reservations"][0]["Instances"][0]
+                  root = inst["RootDeviceName"]
+                  vol_id = None
+                  for bdm in inst.get("BlockDeviceMappings", []):
+                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
+                          vol_id = bdm["Ebs"]["VolumeId"]
+                          break
+                  if not vol_id:
+                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
+                  tags = [{"Key": "Name", "Value": desc[:255]}]
+                  if parent:
+                      tags.append({"Key": "ParentStack", "Value": parent})
+                  nonce = (props.get("Nonce") or "")[:256]
+                  if nonce:
+                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
+                  snap = ec2.create_snapshot(
+                      VolumeId=vol_id,
+                      Description=desc,
+                      TagSpecifications=[
+                          {"ResourceType": "snapshot", "Tags": tags},
+                      ],
+                  )
+                  sid = snap["SnapshotId"]
+                  data = {"SnapshotId": sid, "VolumeId": vol_id}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      event.get("PhysicalResourceId", "failed"),
+                  )
+
+  WordpressRootEbsSnapshot:
+    Type: Custom::WordpressRootEbsSnapshot
+    Condition: CreateSnapshotStack
+    Properties:
+      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
+      InstanceId: !Ref WordpressEC2FromLT
+      Description: !Sub 'wordpress-stage2-root-ebs-snapshot'
+      Nonce: !Ref SnapshotNonce
+      ParentStackName: !Ref AWS::StackName
+
+# Optional resources for restoring from RestoreRootSnapshotId
   RestoreRootAmiRole:
     Type: AWS::IAM::Role
     Condition: HasRestoreSnapshot
@@ -404,7 +471,7 @@ Resources:
           import cfnresponse
           import boto3
           import time
-
+          # Register AMI from root snapshot on Create; deregister AMI on Delete; answer CloudFormation.
           def handler(event, context):
               ec2 = boto3.client("ec2")
               try:
@@ -490,9 +557,10 @@ Resources:
     Properties:
       ServiceToken: !GetAtt RestoreRootAmiLambda.Arn
       SnapshotId: !Ref RestoreRootSnapshotId
-      AmiName: !Sub '${AWS::StackName}-wp-root-${RestoreRootSnapshotId}'
+      AmiName: !Sub 'Wordpress-ami-from-${RestoreRootSnapshotId}'
       RootDeviceName: /dev/xvda
 
+# WordPress server Launch Template for stack update from stage1 to stage2 
   WordpressLT:
     Type: AWS::EC2::LaunchTemplate
     Condition: HasRestoreSnapshot
@@ -502,10 +570,7 @@ Resources:
       - DBUser
       - DBEndpoint
     Properties:
-      # Unique per region: prefix with stack. RestoreRootSnapshotId in the name is not required for 1b→2 (new EC2 logical
-      # id already replaces the instance) but helps snap-A→snap-B on the same stack: LT name cannot change in EC2 after
-      # create, so a new snapshot id → new physical LT → new LaunchTemplateId on WordpressEC2FromLT avoids root snapshot mutate errors.
-      LaunchTemplateName: !Sub '${AWS::StackName}-wordpress-restore-${RestoreRootSnapshotId}'
+      LaunchTemplateName: !Sub 'Wordpress-restored-from-${RestoreRootSnapshotId}'
       VersionDescription: Evolutionary / restore — root from RestoreRootSnapshotId (EBS snapshot boot)
       LaunchTemplateData:
         # AMI built from RestoreRootSnapshotId by RestoreRootRegisteredAmi (register_image). Avoids EC2 snapshotId
@@ -628,6 +693,7 @@ Resources:
             # Step 12 - Signal end of installation & configuration via cfn-signal
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2FromLT --region ${AWS::Region}
 
+# WordPress server launched from one of the Launch Templates above 
   WordpressEC2FromLT:
     Type: AWS::EC2::Instance
     DependsOn:
@@ -645,13 +711,66 @@ Resources:
               command: !Sub 'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) cfn-init CfnMetadataNonce=${CfnMetadataNonce}" >> /var/log/cfn-wp-refresh.log'
             01_wp_sync_public_ip:
               command: |
-                TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-                PUB=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
-                if [ -z "$PUB" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
+                # Read IMDS session token - public IPv4 - and public hostname for this instance.
+                # Set WordPress home and siteurl from hostname when present - otherwise from IPv4 - keep DB URLs aligned with how users open the site.
+                IMDS_SESSION_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+                IMDS_PUBLIC_IPV4=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+                IMDS_PUBLIC_HOSTNAME=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-hostname 2>/dev/null || true)
+                if [ -z "$IMDS_PUBLIC_IPV4" ]; then echo "No public IPv4; skipping wp option sync" >> /var/log/cfn-wp-refresh.log; exit 0; fi
                 if [ ! -f /var/www/html/wp-cli.phar ]; then curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || exit 0; fi
                 cd /var/www/html
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
-                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "http://$PUB" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                if [ -n "$IMDS_PUBLIC_HOSTNAME" ]; then NEW_PUBLIC_SITE_URL="http://$IMDS_PUBLIC_HOSTNAME"; else NEW_PUBLIC_SITE_URL="http://$IMDS_PUBLIC_IPV4"; fi
+                PREVIOUS_HOME_URL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get home 2>/dev/null || true)
+                PREVIOUS_SITEURL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get siteurl 2>/dev/null || true)
+                if [ -z "$PREVIOUS_HOME_URL$PREVIOUS_SITEURL" ]; then echo "WARN 01_wp_sync_public_ip: empty home/siteurl from wp-cli; URL search-replace may miss" >> /var/log/cfn-wp-refresh.log; fi
+                wp_search_replace_if_changed() {
+                  SEARCH_REPLACE_OLD_VALUE="$1"
+                  SEARCH_REPLACE_NEW_VALUE="$2"
+                  if [ -n "$SEARCH_REPLACE_OLD_VALUE" ] && [ "$SEARCH_REPLACE_OLD_VALUE" != "$SEARCH_REPLACE_NEW_VALUE" ]; then
+                    php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root search-replace "$SEARCH_REPLACE_OLD_VALUE" "$SEARCH_REPLACE_NEW_VALUE" --all-tables >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                  fi
+                }
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
+                # Search-replace old home and siteurl through the database - cover trailing-slash variants - do not hand-escape JSON for wp-cli (avoids corrupting block editor JSON).
+                wp_search_replace_if_changed "$PREVIOUS_HOME_URL" "$NEW_PUBLIC_SITE_URL"
+                wp_search_replace_if_changed "$PREVIOUS_SITEURL" "$NEW_PUBLIC_SITE_URL"
+                for PREVIOUS_HOME_OR_SITEURL in "$PREVIOUS_HOME_URL" "$PREVIOUS_SITEURL"; do
+                  [ -z "$PREVIOUS_HOME_OR_SITEURL" ] && continue
+                  PREVIOUS_URL_WITHOUT_TRAILING_SLASHES=$(printf '%s' "$PREVIOUS_HOME_OR_SITEURL" | sed 's|/*$||')
+                  PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST="${PREVIOUS_URL_WITHOUT_TRAILING_SLASHES}/"
+                  wp_search_replace_if_changed "$PREVIOUS_URL_WITHOUT_TRAILING_SLASHES" "$NEW_PUBLIC_SITE_URL"
+                  wp_search_replace_if_changed "$PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST" "$NEW_PUBLIC_SITE_URL"
+                done
+                # Map dotted IPv4 home host to regional ec2-* DNS and legacy us-east-1 form - search-replace those URLs when they appear in content.
+                PREVIOUS_HOME_HOST=$(echo "$PREVIOUS_HOME_URL" | sed 's|^[^/]*//||;s|/.*||')
+                if echo "$PREVIOUS_HOME_HOST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+                  PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL=$(echo "$PREVIOUS_HOME_HOST" | tr '.' '-')
+                  IMDS_INSTANCE_IDENTITY_DOCUMENT=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document 2>/dev/null || true)
+                  IMDS_INSTANCE_REGION=$(echo "$IMDS_INSTANCE_IDENTITY_DOCUMENT" | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  if [ -n "$PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL" ] && [ -n "$IMDS_INSTANCE_REGION" ]; then
+                    PREVIOUS_HOME_EC2_REGIONAL_PUBLIC_DNS_URL=$(printf 'http://ec2-%s.%s.compute.amazonaws.com' "$PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL" "$IMDS_INSTANCE_REGION")
+                    wp_search_replace_if_changed "$PREVIOUS_HOME_EC2_REGIONAL_PUBLIC_DNS_URL" "$NEW_PUBLIC_SITE_URL"
+                    if [ "$IMDS_INSTANCE_REGION" = "us-east-1" ]; then
+                      PREVIOUS_HOME_EC2_US_EAST_LEGACY_PUBLIC_DNS_URL=$(printf 'http://ec2-%s.compute-1.amazonaws.com' "$PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL")
+                      wp_search_replace_if_changed "$PREVIOUS_HOME_EC2_US_EAST_LEGACY_PUBLIC_DNS_URL" "$NEW_PUBLIC_SITE_URL"
+                    fi
+                  fi
+                # Map ec2-* DNS home host back to dotted IPv4 http URL - search-replace when content still references the IPv4 form.
+                elif echo "$PREVIOUS_HOME_HOST" | grep -qE '^ec2-[0-9-]+\.'; then
+                  PREVIOUS_HOME_EC2_DNS_IPV4_LABEL=$(echo "$PREVIOUS_HOME_HOST" | sed 's/^ec2-\([0-9-]*\)\..*/\1/')
+                  if [ -n "$PREVIOUS_HOME_EC2_DNS_IPV4_LABEL" ]; then
+                    PREVIOUS_HOME_IPV4_DOTTED_FROM_EC2_DNS_HOST=$(echo "$PREVIOUS_HOME_EC2_DNS_IPV4_LABEL" | awk -F- 'NF>=4 {print $1"."$2"."$3"."$4}')
+                    if [ -n "$PREVIOUS_HOME_IPV4_DOTTED_FROM_EC2_DNS_HOST" ]; then
+                      PREVIOUS_HOME_HTTP_DOTTED_IPV4_URL=$(printf 'http://%s' "$PREVIOUS_HOME_IPV4_DOTTED_FROM_EC2_DNS_HOST")
+                      wp_search_replace_if_changed "$PREVIOUS_HOME_HTTP_DOTTED_IPV4_URL" "$NEW_PUBLIC_SITE_URL"
+                    fi
+                  fi
+                fi
+                # When site URL uses hostname - replace leftover http://<ipv4> references in content with that hostname URL.
+                if [ -n "$IMDS_PUBLIC_HOSTNAME" ] && [ "$NEW_PUBLIC_SITE_URL" != "http://$IMDS_PUBLIC_IPV4" ]; then
+                  wp_search_replace_if_changed "http://$IMDS_PUBLIC_IPV4" "$NEW_PUBLIC_SITE_URL"
+                fi
               cwd: /var/www/html
     CreationPolicy:
       ResourceSignal:
@@ -674,107 +793,45 @@ Resources:
         - Key: CfnMetadataNonce
           Value: !Sub '${CfnMetadataNonce}'
 
-  SnapshotHelperRole:
-    Type: AWS::IAM::Role
-    Condition: CreateSnapshotStack
+# Other resources for WordPress server 
+  SGWordpress:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: wordpress-sg
+      GroupDescription: "Allow HTTP traffic to WordPress web server"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: '0.0.0.0/0'  #Restrict to specific IPs/ranges in production
+  WordpressInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WordpressRole
+  WordpressRole:
+    Type: 'AWS::IAM::Role'
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeInstances
-                  - ec2:CreateSnapshot
-                  - ec2:CreateTags
-                Resource: '*'
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
 
-  SnapshotHelperLambda:
-    Type: AWS::Lambda::Function
-    Condition: CreateSnapshotStack
-    Properties:
-      Handler: index.handler
-      Runtime: python3.12
-      Role: !GetAtt SnapshotHelperRole.Arn
-      Timeout: 120
-      Code:
-        ZipFile: |
-          import cfnresponse
-          import boto3
 
-          def handler(event, context):
-              try:
-                  if event["RequestType"] == "Delete":
-                      cfnresponse.send(
-                          event,
-                          context,
-                          cfnresponse.SUCCESS,
-                          {},
-                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
-                      )
-                      return
-                  props = event["ResourceProperties"]
-                  instance_id = props["InstanceId"]
-                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
-                  parent = (props.get("ParentStackName") or "")[:256]
-                  ec2 = boto3.client("ec2")
-                  di = ec2.describe_instances(InstanceIds=[instance_id])
-                  if not di.get("Reservations"):
-                      raise RuntimeError("Instance not found: %s" % instance_id)
-                  inst = di["Reservations"][0]["Instances"][0]
-                  root = inst["RootDeviceName"]
-                  vol_id = None
-                  for bdm in inst.get("BlockDeviceMappings", []):
-                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
-                          vol_id = bdm["Ebs"]["VolumeId"]
-                          break
-                  if not vol_id:
-                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
-                  tags = [{"Key": "Name", "Value": desc[:255]}]
-                  if parent:
-                      tags.append({"Key": "ParentStack", "Value": parent})
-                  nonce = (props.get("Nonce") or "")[:256]
-                  if nonce:
-                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
-                  snap = ec2.create_snapshot(
-                      VolumeId=vol_id,
-                      Description=desc,
-                      TagSpecifications=[
-                          {"ResourceType": "snapshot", "Tags": tags},
-                      ],
-                  )
-                  sid = snap["SnapshotId"]
-                  data = {"SnapshotId": sid, "VolumeId": vol_id}
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
-              except Exception as e:
-                  print(repr(e))
-                  cfnresponse.send(
-                      event,
-                      context,
-                      cfnresponse.FAILED,
-                      {"Error": str(e)[:2048]},
-                      event.get("PhysicalResourceId", "failed"),
-                  )
-
-  WordpressRootEbsSnapshot:
-    Type: Custom::WordpressRootEbsSnapshot
-    Condition: CreateSnapshotStack
-    Properties:
-      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
-      InstanceId: !Ref WordpressEC2FromLT
-      Description: !Sub 'wp-stage2-${AWS::StackName}-root'
-      Nonce: !Ref SnapshotNonce
-      ParentStackName: !Ref AWS::StackName
 
 Outputs:
   WordpressURL:
@@ -784,8 +841,8 @@ Outputs:
     Value: !Sub 'http://${WordpressEC2FromLT.PublicDnsName}'
   WordpressInstanceAutoIP:
     Description: >-
-      Ephemeral public IPv4 assigned to WordpressEC2FromLT while running. Absent when stopped. Start the instance before stack update.
-      if CloudFormation fails resolving this output.
+      Ephemeral public IPv4 assigned to WordpressEC2FromLT while running. Absent when stopped.
+      Start the instance before stack update if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2FromLT.PublicIp
   WordpressRootSnapshotId:
     Condition: CreateSnapshotStack
@@ -795,3 +852,7 @@ Outputs:
     Condition: CreateSnapshotStack
     Description: Root EBS volume ID at time of snapshot.
     Value: !GetAtt WordpressRootEbsSnapshot.VolumeId
+  WordpressInstanceId:
+    Description: >-
+      EC2 instance id of WordpressEC2FromLT.
+    Value: !Ref WordpressEC2FromLT    
