@@ -365,7 +365,7 @@ Resources:
         ZipFile: |
           import cfnresponse
           import boto3
-          # Describe the WordPress EC2 instance - find root EBS volume - create snapshot with tags - return snapshot id to CloudFormation.
+          # Create snapshot with tags from EC2's EBS root volume, and return snapshot id to CloudFormation.
           def handler(event, context):
               try:
                   if event["RequestType"] == "Delete":
@@ -471,7 +471,7 @@ Resources:
           import cfnresponse
           import boto3
           import time
-          # Register AMI from root snapshot on Create; deregister AMI on Delete; answer CloudFormation.
+          # Register AMI from root snapshot on Create; Deregister AMI on Delete; answer CloudFormation.
           def handler(event, context):
               ec2 = boto3.client("ec2")
               try:

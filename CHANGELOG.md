@@ -17,7 +17,9 @@ Cumulative updates to stages 1–3 CloudFormation templates since the January 20
 - Stage 3: Launch template logical id `WordpressAppTierLT` (replaces `WordpressLaunchTemplate`); `WordpressEC2` `DependsOn` includes `RDSinstance` and `LocalMariaDbToRdsMigration` so RDS and the migration custom resource (no-op when disabled) run before the app instance create.
 
 ### Fixed
-- Stages 1–3 public subnets: removed the IPv6 workaround custom resource (Lambda used `is` instead of `==` on `RequestType` and Delete handling was unreliable); use native `AssignIpv6AddressOnCreation` on public subnets instead. Stages 4–5 still ship the older workaround pattern.
+- Stages 1–3 public subnets: removed the IPv6 workaround custom resource (Lambda used `is` instead of `==` on `RequestType` and Delete handling was unreliable); use native `AssignIpv6AddressOnCreation` on public subnets instead. Stage 5 still ships the older workaround pattern on public subnets.
+- Stage 3: Media uploads failed on greenfield AL2023 (`Unable to create directory … wp-content/uploads/…`) because `wp-content` stayed `httpd_sys_content_t` under SELinux; UserData now ensures `wp-content/uploads` exists, normalizes modes after optional snapshot rsync, and applies `chcon -R -t httpd_sys_rw_content_t` on `wp-content` when SELinux is Enforcing or Permissive. The `cfn-init` uploads-restore hook applies the same labeling after rsync.
+- Stage 4: Same upload symptom on greenfield AL2023: UserData ensures local `wp-content/uploads`, `chcon` to `httpd_sys_rw_content_t`, and persistent `setsebool -P httpd_use_nfs 1` so httpd can write once `wp-content` is mounted on EFS (NFS). The uploads-restore `cfn-init` hook applies `chcon`, modes, and `httpd_use_nfs` after rsync; **`migrate_wp_content_to_efs`** applies directory/file modes and `httpd_use_nfs` after the live EFS mount (including when `wp-content` was already an EFS mountpoint).
 
 ### Removed
 - Stages 1–3: `IPv6WorkaroundLambda`, `IPv6WorkaroundRole`, and per-subnet `Custom::SubnetModify` helpers on public subnets A/B/C.

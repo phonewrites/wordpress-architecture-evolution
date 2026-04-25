@@ -1,9 +1,8 @@
-# IMPORTANT: Refer to the .md file for instructions on creating the DBPassword
-# SecureString parameter manually before deploying this template.
+# Create the /Wordpress/DBPassword SecureString before deploying; see README.md.
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
   WordPress application AWS architecture evolution - Stage 3
-  Application server with separate RDS database.
+  Application server with separate RDS database + optional EBS snapshot
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI.
@@ -15,8 +14,8 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >-
-      true: Allows same stack upgrade from stage 2: run mysqldump on the existing WordPress EC2 (local MariaDB) and import into RDS via SSM
-      RunCommand, then stop MariaDB and point wp-config at RDS.
+      true: Same-stack upgrade from stage 2; copy the existing local MariaDB database into RDS through SSM RunCommand,
+      then stop MariaDB and point wp-config at RDS.
       false: greenfield deployment.
   SourceWordpressInstanceId:
     Type: String
@@ -24,7 +23,8 @@ Parameters:
     AllowedPattern: '^$|^i-[a-f0-9]+$'
     ConstraintDescription: Empty or an EC2 instance id (i- followed by lowercase hex).
     Description: >-
-      Enter the stage 2 WordpressInstanceId output from last stack create/update; Ignored if MigrateFromStage2LocalMariaDb is false
+      Enter the stage 2 WordpressInstanceId output from the last stack create/update.
+      Ignored when MigrateFromStage2LocalMariaDb is false.
   CfnMetadataNonce:
     Type: Number
     Default: 1
@@ -39,8 +39,26 @@ Parameters:
     ConstraintDescription: Empty or an EBS snapshot id (snap- followed by lowercase hex).
     Description: >-
       Empty: Greenfield stage3 stack.
-      Non-empty: EBS snapshot id whose filesystem contains the old WordPress tree;
-      For stage2 to stage3 stack update: Use WordpressRootSnapshotId output from a stage2 update that created it.
+      Non-empty: EBS snapshot id whose filesystem contains the old WordPress tree.
+      For same-stack stage2 to stage3 updates, use the WordpressRootSnapshotId output from a stage2 update that created it.
+      Changing this value after a volume already exists recreates the uploads helper volume.
+  EnableSnapshotStack:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      When true, create in-template resources (Lambda + custom resource) to snapshot WordpressEC2 root EBS volume.
+      First deploy can leave false; after WordPress is set up, update the same stack with true to opt in.
+  SnapshotNonce:
+    Type: String
+    Default: v1
+    AllowedPattern: '^v[1-9][0-9]*$'
+    ConstraintDescription: >-
+      v then a positive integer (v1, v2, v3, …).
+    MaxLength: 16
+    Description: >-
+      When setting EnableSnapshotStack to true, bump this during stack update to label a new version (e.g. v1 to v2);
+      Must match v + integer.
 
 Rules:
   InstanceIdRequiredWhenMigrate:
@@ -55,9 +73,10 @@ Conditions:
     - !Equals [!Ref MigrateFromStage2LocalMariaDb, 'true']
     - !Not [!Equals [!Ref SourceWordpressInstanceId, '']]
   HasUploadsSourceEbsSnapshot: !Not [!Equals [!Ref UploadsSourceEbsSnapshotId, '']]
+  CreateSnapshotStack: !Equals [!Ref EnableSnapshotStack, 'true']
 
 Resources:
-# Network skeleton with Db subnets added for RDS resources (2 tiers: Public/App + Db)
+# Network skeleton with public and DB subnets
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -287,7 +306,7 @@ Resources:
           import cfnresponse
           import boto3
           import time
-          # For stage 2 to stage 3 migration: Run SSM on source EC2. Skip on disabled migration or Delete.
+          # Copy the stage 2 database through SSM; skip when migration is off or the stack is deleting.
           def handler(event, context):
               phys = event.get("PhysicalResourceId") or "rds-migrate"
               try:
@@ -377,18 +396,138 @@ Resources:
       RdsPort: !GetAtt RDSinstance.Endpoint.Port
       Region: !Ref AWS::Region
 
-  WordpressUploadsSourceVolume:
-    Type: AWS::EC2::Volume
+# Optional resources for EBS volume from the uploads source snapshot
+  UploadsSnapshotHelperRole:
+    Type: AWS::IAM::Role
     Condition: HasUploadsSourceEbsSnapshot
     Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub uploads-snapshot-hlpr-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateVolume
+                  - ec2:DeleteVolume
+                  - ec2:DescribeVolumes
+                  - ec2:DetachVolume
+                  - ec2:CreateTags
+                Resource: '*'
+
+  UploadsSnapshotHelperLambda:
+    Type: AWS::Lambda::Function
+    Condition: HasUploadsSourceEbsSnapshot
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt UploadsSnapshotHelperRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+          import time
+          from botocore.exceptions import ClientError
+          # Create an uploads helper volume from the selected snapshot; replace it when the source snapshot or AZ changes.
+          def handler(event, context):
+              ec2 = boto3.client("ec2")
+              phys = event.get("PhysicalResourceId") or ""
+              props = event["ResourceProperties"]
+              old = event.get("OldResourceProperties") or {}
+              snap = (props.get("SnapshotId") or "").strip()
+              az = (props.get("AvailabilityZone") or "").strip()
+              stack = (props.get("StackNameTag") or "wordpress")[:255]
+
+              def delete_volume(vol_id):
+                  if not vol_id or not vol_id.startswith("vol-"):
+                      return
+                  try:
+                      vols = ec2.describe_volumes(VolumeIds=[vol_id]).get("Volumes") or []
+                      for att in (vols[0].get("Attachments") or []) if vols else []:
+                          ec2.detach_volume(VolumeId=vol_id, InstanceId=att["InstanceId"], Force=True)
+                      for _ in range(120):
+                          v = ec2.describe_volumes(VolumeIds=[vol_id])["Volumes"][0]
+                          if v["State"] == "available" and not v.get("Attachments"):
+                              break
+                          time.sleep(2)
+                      ec2.delete_volume(VolumeId=vol_id)
+                      for _ in range(120):
+                          try:
+                              ec2.describe_volumes(VolumeIds=[vol_id])
+                          except ClientError as e:
+                              if e.response["Error"]["Code"] == "InvalidVolume.NotFound":
+                                  return
+                          time.sleep(2)
+                  except Exception as e:
+                      print("delete_volume", repr(e))
+
+              try:
+                  if event["RequestType"] == "Delete":
+                      delete_volume(phys)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, phys or "deleted")
+                      return
+                  if not snap.startswith("snap-"):
+                      raise ValueError("SnapshotId must be snap-…")
+                  if not az:
+                      raise ValueError("AvailabilityZone required")
+                  need_new = event["RequestType"] == "Create"
+                  if event["RequestType"] == "Update":
+                      if snap != (old.get("SnapshotId") or "").strip() or az != (old.get("AvailabilityZone") or "").strip():
+                          need_new = True
+                          delete_volume(phys)
+                  if need_new:
+                      vol = ec2.create_volume(
+                          AvailabilityZone=az,
+                          SnapshotId=snap,
+                          VolumeType="gp3",
+                          TagSpecifications=[
+                              {
+                                  "ResourceType": "volume",
+                                  "Tags": [
+                                      {"Key": "Name", "Value": stack[:255]},
+                                      {"Key": "SourceSnapshot", "Value": snap[:255]},
+                                  ],
+                              }
+                          ],
+                      )
+                      vid = vol["VolumeId"]
+                      ec2.get_waiter("volume_available").wait(
+                          VolumeIds=[vid],
+                          WaiterConfig={"Delay": 5, "MaxAttempts": 120},
+                      )
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {"VolumeId": vid}, vid)
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {"VolumeId": phys}, phys)
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      phys or "failed",
+                  )
+
+  WordpressUploadsSourceVolume:
+    Type: Custom::WordpressUploadsSourceVolumeFromSnapshot
+    Condition: HasUploadsSourceEbsSnapshot
+    Properties:
+      ServiceToken: !GetAtt UploadsSnapshotHelperLambda.Arn
       AvailabilityZone: !GetAtt SubnetPublicA.AvailabilityZone
       SnapshotId: !Ref UploadsSourceEbsSnapshotId
-      VolumeType: gp3
-      Tags:
-        - Key: Name
-          Value: !Sub 'Wordpress-uploads-source'
+      StackNameTag: !Sub 'Wordpress-uploads-source-${AWS::StackName}'
 
-  # WordPress server Launch Template: app tier only
+# WordPress server Launch Template: app tier with RDS
   WordpressAppTierLT:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -416,9 +555,10 @@ Resources:
           Fn::Base64: !Sub
             - |
               #!/bin/bash
-              # Set UploadsSourceEbsSnapshotId to snap-… when copying uploads from an existing/stage2 root snapshot - leave empty for greenfield.
+              # Choose whether this boot should copy uploads from an earlier root snapshot.
               SNAPSHOT_ID="${UploadsSourceEbsSnapshotId}"
               UPLOADS_EBS_VOLUME_ID="${UploadsCfnVolumeId}"
+              # Prepare cfn tools and always signal CloudFormation when bootstrap ends.
               if ! rpm -q aws-cfn-bootstrap >/dev/null 2>&1; then dnf install -y aws-cfn-bootstrap; fi
               _cfn_exit() {
                 local s=$?
@@ -433,7 +573,7 @@ Resources:
               DBUser=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBUser --query Parameters[0].Value --output text)
               DBEndpoint=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBEndpoint --query Parameters[0].Value --output text)
               DBPassword=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBPassword --with-decryption --query Parameters[0].Value --output text)
-              # Step 1b - Wait for uploads snapshot volume to be attachable - force-detach from another instance after ~2 min if needed - attach to this instance - wait for block device nodes.
+              # Step 1b - Prepare the uploads snapshot volume for copying media files
               if [ -n "$SNAPSHOT_ID" ] && [ -n "$UPLOADS_EBS_VOLUME_ID" ]; then
                 TOKEN_IMDS=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
                 INSTANCE_IMDS=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/instance-id)
@@ -478,7 +618,7 @@ Resources:
               fi
               # Step 2 - Run system updates
               dnf -y --refresh upgrade
-              # Step 3 - Install system software - Web server only (no local database)
+              # Step 3 - Install system software - Web only, database lives in RDS
               dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel
               # Step 4 - Web Server Online - and set to startup
               systemctl enable httpd
@@ -496,7 +636,7 @@ Resources:
               sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
               sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
               sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
-              # Step 7 - Use the browser address for Wordpress site links (echo avoids YAML/heredoc indent clash under Fn::Sub list)
+              # Step 7 - Use the browser address for Wordpress site links
               if ! grep -q 'Follow browser hostname for WP_HOME' wp-config.php; then
                 WPCONFIG_INSERT_TMP=$(mktemp)
                 WPCONFIG_MERGED_TMP=$(mktemp)
@@ -517,7 +657,7 @@ Resources:
               chmod 2775 /var/www
               find /var/www -type d -exec chmod 2775 {} \;
               find /var/www -type f -exec chmod 0664 {} \;
-              # Step 8b - Mount first XFS partition from uploads snapshot volume with nouuid - rsync wp-content/uploads into place when restoring from stage2 root snapshot.
+              # Step 8b - Copy media uploads from the snapshot volume when preserving an existing site
               if [ -n "$SNAPSHOT_ID" ]; then
                 set +e
                 for attempt in $(seq 1 30); do
@@ -536,9 +676,16 @@ Resources:
                     umount /mnt/wp-uploads-source 2>/dev/null || true
                   fi
                 done
-                mkdir -p /var/www/html/wp-content/uploads
-                chown -R ec2-user:apache /var/www/html/wp-content/uploads
                 set -e
+              fi
+              # Step 8c - Make wp-content writable for WordPress uploads
+              mkdir -p /var/www/html/wp-content/uploads
+              chown -R ec2-user:apache /var/www/html/wp-content/uploads
+              find /var/www/html/wp-content/uploads -type d -exec chmod 2775 {} \; 2>/dev/null || true
+              find /var/www/html/wp-content/uploads -type f -exec chmod 0664 {} \; 2>/dev/null || true
+              SELINUX_STATE=$(getenforce 2>/dev/null || true)
+              if [ "$SELINUX_STATE" = "Enforcing" ] || [ "$SELINUX_STATE" = "Permissive" ]; then
+                chcon -R -t httpd_sys_rw_content_t /var/www/html/wp-content || true
               fi
               # Step 9 - Use cfn-init + cfn-hup for stack-driven refresh on EC2 Metadata change
               mkdir -p /etc/cfn/hooks.d
@@ -644,12 +791,12 @@ Resources:
               cwd: /var/www/html
         restore_uploads_from_ebs_snapshot_volume:
           commands:
-            # Re-run uploads rsync from the attached snapshot volume when metadata nonce or restore flag changes (cfn-hup refresh).
+            # Copy media uploads again when stack metadata asks cfn-init to refresh.
             02_restore_wp_uploads_from_snapshot_volume:
               command: !Sub
                 - |
                   set +e
-                  # Wait for snapshot block device - mount first XFS partition with nouuid - rsync wp-content/uploads - fix ownership.
+                  # Find the snapshot volume, copy uploads into WordPress, and fix ownership.
                   UPLOADS_SNAPSHOT="${EbsSnapshotId}"
                   if [ -z "$UPLOADS_SNAPSHOT" ]; then echo "No UploadsSourceEbsSnapshotId; skip restore" >> /var/log/cfn-wp-refresh.log; exit 0; fi
                   for attempt in $(seq 1 120); do
@@ -665,6 +812,12 @@ Resources:
                         umount /mnt/wp-uploads-source 2>/dev/null || true
                         echo "cfn-init: restored wp-content/uploads from $UPLOADS_SNAPSHOT via $DATA_DEV" >> /var/log/cfn-wp-refresh.log
                         chown -R ec2-user:apache /var/www/html/wp-content/uploads
+                        find /var/www/html/wp-content/uploads -type d -exec chmod 2775 {} \; 2>/dev/null || true
+                        find /var/www/html/wp-content/uploads -type f -exec chmod 0664 {} \; 2>/dev/null || true
+                        SELINUX_STATE=$(getenforce 2>/dev/null || true)
+                        if [ "$SELINUX_STATE" = "Enforcing" ] || [ "$SELINUX_STATE" = "Permissive" ]; then
+                          chcon -R -t httpd_sys_rw_content_t /var/www/html/wp-content || true
+                        fi
                         exit 0
                       fi
                       umount /mnt/wp-uploads-source 2>/dev/null || true
@@ -677,8 +830,8 @@ Resources:
         EbsSnapshotId: !Ref UploadsSourceEbsSnapshotId
     CreationPolicy:
       ResourceSignal:
-        # t2.micro + dnf --refresh upgrade + WordPress + optional uploads rsync + cfn-init can exceed PT15M; PT45M matches realistic same-stack cutover headroom.
-        Timeout: PT45M
+        # Give the small instance enough time for system updates, WordPress setup, media copy, and cfn-init.
+        Timeout: PT20M
     Properties:
       SubnetId: !Ref SubnetPublicA
       LaunchTemplate:
@@ -689,6 +842,109 @@ Resources:
           Value: Wordpress-LT-built-Db-split
         - Key: CfnMetadataNonce
           Value: !Sub '${CfnMetadataNonce}'
+
+# Optional resources for crash-consistent root EBS snapshot
+  SnapshotHelperRole:
+    Type: AWS::IAM::Role
+    Condition: CreateSnapshotStack
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub snapshot-ec2-${AWS::StackName}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshot
+                  - ec2:CreateTags
+                Resource: '*'
+
+  SnapshotHelperLambda:
+    Type: AWS::Lambda::Function
+    Condition: CreateSnapshotStack
+    Properties:
+      Handler: index.handler
+      Runtime: python3.12
+      Role: !GetAtt SnapshotHelperRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import boto3
+          # Create snapshot with tags from EC2's EBS root volume, and return snapshot id to CloudFormation.
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.SUCCESS,
+                          {},
+                          event.get("PhysicalResourceId") or "delete-no-snapshot-removal",
+                      )
+                      return
+                  props = event["ResourceProperties"]
+                  instance_id = props["InstanceId"]
+                  desc = (props.get("Description") or "wordpress-root-snapshot")[:255]
+                  parent = (props.get("ParentStackName") or "")[:256]
+                  ec2 = boto3.client("ec2")
+                  di = ec2.describe_instances(InstanceIds=[instance_id])
+                  if not di.get("Reservations"):
+                      raise RuntimeError("Instance not found: %s" % instance_id)
+                  inst = di["Reservations"][0]["Instances"][0]
+                  root = inst["RootDeviceName"]
+                  vol_id = None
+                  for bdm in inst.get("BlockDeviceMappings", []):
+                      if bdm.get("DeviceName") == root and "Ebs" in bdm:
+                          vol_id = bdm["Ebs"]["VolumeId"]
+                          break
+                  if not vol_id:
+                      raise RuntimeError("Could not resolve root EBS volume for %s" % instance_id)
+                  tags = [{"Key": "Name", "Value": desc[:255]}]
+                  if parent:
+                      tags.append({"Key": "ParentStack", "Value": parent})
+                  nonce = (props.get("Nonce") or "")[:256]
+                  if nonce:
+                      tags.append({"Key": "SnapshotNonce", "Value": nonce})
+                  snap = ec2.create_snapshot(
+                      VolumeId=vol_id,
+                      Description=desc,
+                      TagSpecifications=[
+                          {"ResourceType": "snapshot", "Tags": tags},
+                      ],
+                  )
+                  sid = snap["SnapshotId"]
+                  data = {"SnapshotId": sid, "VolumeId": vol_id}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data, sid)
+              except Exception as e:
+                  print(repr(e))
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Error": str(e)[:2048]},
+                      event.get("PhysicalResourceId", "failed"),
+                  )
+
+  WordpressRootEbsSnapshot:
+    Type: Custom::WordpressRootEbsSnapshot
+    Condition: CreateSnapshotStack
+    Properties:
+      ServiceToken: !GetAtt SnapshotHelperLambda.Arn
+      InstanceId: !Ref WordpressEC2
+      Description: !Sub 'wordpress-stage3-root-ebs-snapshot'
+      Nonce: !Ref SnapshotNonce
+      ParentStackName: !Ref AWS::StackName
 
   RDSinstance:
     Type: AWS::RDS::DBInstance
@@ -802,3 +1058,11 @@ Outputs:
       Ephemeral public IPv4 assigned to WordpressEC2 while running. Absent when stopped.
       Start the instance before stack update if CloudFormation fails resolving this output.
     Value: !GetAtt WordpressEC2.PublicIp
+  WordpressRootSnapshotId:
+    Condition: CreateSnapshotStack
+    Description: EBS snapshot ID of WordpressEC2 root volume (EnableSnapshotStack set to true).
+    Value: !GetAtt WordpressRootEbsSnapshot.SnapshotId
+  WordpressRootVolumeId:
+    Condition: CreateSnapshotStack
+    Description: Root EBS volume ID at time of snapshot.
+    Value: !GetAtt WordpressRootEbsSnapshot.VolumeId
