@@ -14,8 +14,7 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >-
-      true: Same-stack upgrade from stage 2; copy the existing local MariaDB database into RDS through SSM RunCommand,
-      then stop MariaDB and point wp-config at RDS.
+      true: Same-stack upgrade from stage 2; copy local MariaDB into RDS, then point WordPress at RDS.
       false: greenfield deployment.
   SourceWordpressInstanceId:
     Type: String
@@ -40,7 +39,7 @@ Parameters:
     Description: >-
       Empty: Greenfield stage3 stack.
       Non-empty: EBS snapshot id whose filesystem contains the old WordPress tree.
-      For same-stack stage2 to stage3 updates, use the WordpressRootSnapshotId output from a stage2 update that created it.
+      For stage2 to stage3 updates, use the stage2 WordpressRootSnapshotId output.
       Changing this value after a volume already exists recreates the uploads helper volume.
   EnableSnapshotStack:
     Type: String
@@ -306,7 +305,7 @@ Resources:
           import cfnresponse
           import boto3
           import time
-          # Copy the stage 2 database through SSM; skip when migration is off or the stack is deleting.
+          # Copy the stage 2 database through SSM; skip when off or deleting.
           def handler(event, context):
               phys = event.get("PhysicalResourceId") or "rds-migrate"
               try:
@@ -438,7 +437,7 @@ Resources:
           import boto3
           import time
           from botocore.exceptions import ClientError
-          # Create an uploads helper volume from the selected snapshot; replace it when the source snapshot or AZ changes.
+          # Create an uploads helper volume from the selected snapshot.
           def handler(event, context):
               ec2 = boto3.client("ec2")
               phys = event.get("PhysicalResourceId") or ""
@@ -558,7 +557,7 @@ Resources:
               # Choose whether this boot should copy uploads from an earlier root snapshot.
               SNAPSHOT_ID="${UploadsSourceEbsSnapshotId}"
               UPLOADS_EBS_VOLUME_ID="${UploadsCfnVolumeId}"
-              # Prepare cfn tools and always signal CloudFormation when bootstrap ends.
+              # Prepare cfn tools and signal CloudFormation when bootstrap ends.
               if ! rpm -q aws-cfn-bootstrap >/dev/null 2>&1; then dnf install -y aws-cfn-bootstrap; fi
               _cfn_exit() {
                 local s=$?
@@ -729,7 +728,7 @@ Resources:
             01_wp_sync_public_ip:
               command: |
                 # Read IMDS session token - public IPv4 - and public hostname for this instance.
-                # Set WordPress home and siteurl from hostname when present - otherwise from IPv4 - search-replace stale URLs in the database (same pattern as stage2).
+                # Keep WordPress URLs aligned with the current public address.
                 IMDS_SESSION_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
                 IMDS_PUBLIC_IPV4=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
                 IMDS_PUBLIC_HOSTNAME=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_SESSION_TOKEN" http://169.254.169.254/latest/meta-data/public-hostname 2>/dev/null || true)
@@ -749,7 +748,7 @@ Resources:
                 }
                 php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
                 php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "$NEW_PUBLIC_SITE_URL" >> /var/log/cfn-wp-refresh.log 2>&1 || true
-                # Search-replace old home and siteurl through the database - cover trailing-slash variants - do not hand-escape JSON for wp-cli (avoids corrupting block editor JSON).
+                # Replace old home and siteurl values, including trailing-slash variants.
                 wp_search_replace_if_changed "$PREVIOUS_HOME_URL" "$NEW_PUBLIC_SITE_URL"
                 wp_search_replace_if_changed "$PREVIOUS_SITEURL" "$NEW_PUBLIC_SITE_URL"
                 for PREVIOUS_HOME_OR_SITEURL in "$PREVIOUS_HOME_URL" "$PREVIOUS_SITEURL"; do
@@ -759,7 +758,7 @@ Resources:
                   wp_search_replace_if_changed "$PREVIOUS_URL_WITHOUT_TRAILING_SLASHES" "$NEW_PUBLIC_SITE_URL"
                   wp_search_replace_if_changed "$PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST" "$NEW_PUBLIC_SITE_URL"
                 done
-                # Map dotted IPv4 home host to regional ec2-* DNS and legacy us-east-1 form - search-replace those URLs when they appear in content.
+                # Replace old EC2 DNS forms when content still references them.
                 PREVIOUS_HOME_HOST=$(echo "$PREVIOUS_HOME_URL" | sed 's|^[^/]*//||;s|/.*||')
                 if echo "$PREVIOUS_HOME_HOST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
                   PREVIOUS_HOME_IPV4_EC2_PUBLIC_DNS_LABEL=$(echo "$PREVIOUS_HOME_HOST" | tr '.' '-')
@@ -773,7 +772,7 @@ Resources:
                       wp_search_replace_if_changed "$PREVIOUS_HOME_EC2_US_EAST_LEGACY_PUBLIC_DNS_URL" "$NEW_PUBLIC_SITE_URL"
                     fi
                   fi
-                # Map ec2-* DNS home host back to dotted IPv4 http URL - search-replace when content still references the IPv4 form.
+                # Replace old dotted IPv4 form when content still references it.
                 elif echo "$PREVIOUS_HOME_HOST" | grep -qE '^ec2-[0-9-]+\.'; then
                   PREVIOUS_HOME_EC2_DNS_IPV4_LABEL=$(echo "$PREVIOUS_HOME_HOST" | sed 's/^ec2-\([0-9-]*\)\..*/\1/')
                   if [ -n "$PREVIOUS_HOME_EC2_DNS_IPV4_LABEL" ]; then
@@ -784,7 +783,7 @@ Resources:
                     fi
                   fi
                 fi
-                # When site URL uses hostname - replace leftover http://<ipv4> references in content with that hostname URL.
+                # Replace leftover raw IPv4 URLs when the site uses hostname.
                 if [ -n "$IMDS_PUBLIC_HOSTNAME" ] && [ "$NEW_PUBLIC_SITE_URL" != "http://$IMDS_PUBLIC_IPV4" ]; then
                   wp_search_replace_if_changed "http://$IMDS_PUBLIC_IPV4" "$NEW_PUBLIC_SITE_URL"
                 fi

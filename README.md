@@ -113,7 +113,7 @@ aws cloudformation create-stack --stack-name wordpress-stage3 \
 ```bash
 aws cloudformation create-stack --stack-name wordpress-stage4 \
   --template-body file://stage4_FsSplitFromServer.yaml \
-  --capabilities CAPABILITY_IAM
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
 ```
 
 ### Stage 5: Auto-Scaling Architecture
