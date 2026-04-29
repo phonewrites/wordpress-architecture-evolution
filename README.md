@@ -126,10 +126,12 @@ aws cloudformation create-stack --stack-name wordpress-stage4 \
 ```bash
 aws cloudformation create-stack --stack-name wordpress-stage5 \
   --template-body file://stage5_AlbAsg.yaml \
-  --capabilities CAPABILITY_IAM
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
 ```
 
-**Access**: Use ALB DNS name from outputs for consistent access to WordPress installation.
+**Optional custom domain**: Set `Subdomain=myblog` and `RootDomain=example.com` to use `https://myblog.wp.example.com`. The root domain must already exist as a public Route 53 hosted zone.
+
+**Access**: Use the `WordpressURL` stack output. It is the ALB HTTP URL by default, or the custom HTTPS URL when domain parameters are set.
 <br />
 <br />
 
