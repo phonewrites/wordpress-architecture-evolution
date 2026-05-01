@@ -1,54 +1,40 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  WordPress architecture evolution - Stage 3 nested root stack
-  Application server with separate RDS database
+  WordPress architecture evolution - Stage 4 nested root stack
+  Application server with separate RDS database & EFS shared storage
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: Stage 3 configuration
+          default: Stage 4 configuration
         Parameters:
-          - Stage3Mode
           - LatestAmiId
           - SourceAmiId
           - CfnMetadataNonce
     ParameterLabels:
-      Stage3Mode:
-        default: Stage 3 mode
       LatestAmiId:
         default: Amazon Linux 2023 AMI
       SourceAmiId:
-        default: Stage 2 source AMI ID
+        default: Stage 3 source AMI ID
       CfnMetadataNonce:
         default: cfn-init refresh nonce
 
 Parameters:
-  Stage3Mode:
-    Type: String
-    Default: cutover
-    AllowedValues:
-      - prepare
-      - cutover
-    Description: prepare adds RDS while keeping stage 2 app running; cutover replaces app with RDS-backed app tier.
   LatestAmiId:
-    Description: Latest Amazon Linux 2023 AMI for greenfield stage 3.
+    Description: Latest Amazon Linux 2023 AMI for greenfield stage 4.
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64
   SourceAmiId:
     Type: String
     Default: ''
     AllowedPattern: '^$|^ami-[a-z0-9]+$'
-    Description: Optional AMI created from stage 2 before cutover. Use for same-stack upgrades to preserve wp-content files.
+    Description: Optional AMI created from stage 3 before updating to stage 4. Use for same-stack upgrades to preserve wp-content files before EFS cutover.
   CfnMetadataNonce:
     Type: Number
     Default: 1
     MinValue: 1
     MaxValue: 2147483647
     Description: Increase on stack update so cfn-hup re-runs cfn-init.
-
-Conditions:
-  PrepareMode: !Equals [!Ref Stage3Mode, prepare]
-  CutoverMode: !Equals [!Ref Stage3Mode, cutover]
 
 Resources:
   NetworkStack:
@@ -79,33 +65,29 @@ Resources:
         DbSubnetBId: !GetAtt NetworkStack.Outputs.DbSubnetBId
         DbSubnetCId: !GetAtt NetworkStack.Outputs.DbSubnetCId
 
+  ContentStorageStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../nested/content-storage.yaml
+      Parameters:
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        AppSubnetAId: !GetAtt NetworkStack.Outputs.AppSubnetAId
+        AppSubnetBId: !GetAtt NetworkStack.Outputs.AppSubnetBId
+        AppSubnetCId: !GetAtt NetworkStack.Outputs.AppSubnetCId
+
   SharedSsmStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: ../nested/shared-ssm.yaml
       Parameters:
         DBEndpointValue: !GetAtt DatabaseStack.Outputs.DBEndpointAddress
-
-  SingleServerStack:
-    Type: AWS::CloudFormation::Stack
-    Condition: PrepareMode
-    DependsOn: SharedSsmStack
-    Properties:
-      TemplateURL: ../nested/single-server-lt.yaml
-      Parameters:
-        LatestAmiId: !Ref LatestAmiId
-        SourceAmiId: !Ref SourceAmiId
-        CfnMetadataNonce: !Ref CfnMetadataNonce
-        VpcId: !GetAtt NetworkStack.Outputs.VpcId
-        PublicSubnetId: !GetAtt NetworkStack.Outputs.PublicSubnetAId
-        InstanceProfileName: !GetAtt IamStack.Outputs.InstanceProfileName
+        EFSfsidValue: !GetAtt ContentStorageStack.Outputs.EfsId
 
   AppServerStack:
     Type: AWS::CloudFormation::Stack
-    Condition: CutoverMode
     DependsOn: SharedSsmStack
     Properties:
-      TemplateURL: ../nested/app-rds.yaml
+      TemplateURL: ../nested/app-efs.yaml
       Parameters:
         LatestAmiId: !Ref LatestAmiId
         SourceAmiId: !Ref SourceAmiId
@@ -113,31 +95,23 @@ Resources:
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
         PublicSubnetId: !GetAtt NetworkStack.Outputs.PublicSubnetAId
         InstanceProfileName: !GetAtt IamStack.Outputs.InstanceProfileName
+        EfsId: !GetAtt ContentStorageStack.Outputs.EfsId
 
 Outputs:
   WordpressURL:
-    Description: Open this URL to verify WordPress.
-    Value: !If
-      - PrepareMode
-      - !GetAtt SingleServerStack.Outputs.WordpressURL
-      - !GetAtt AppServerStack.Outputs.WordpressURL
+    Description: Open this stable Elastic IP URL to verify WordPress.
+    Value: !GetAtt AppServerStack.Outputs.WordpressURL
   WordpressInstanceId:
     Description: Current WordPress EC2 instance ID.
-    Value: !If
-      - PrepareMode
-      - !GetAtt SingleServerStack.Outputs.WordpressInstanceId
-      - !GetAtt AppServerStack.Outputs.WordpressInstanceId
+    Value: !GetAtt AppServerStack.Outputs.WordpressInstanceId
   WordpressInstanceAutoIP:
-    Value: !If
-      - PrepareMode
-      - !GetAtt SingleServerStack.Outputs.WordpressInstanceAutoIP
-      - !GetAtt AppServerStack.Outputs.WordpressInstanceAutoIP
-  RdsEndpoint:
-    Value: !GetAtt DatabaseStack.Outputs.DBEndpointAddress
+    Value: !GetAtt AppServerStack.Outputs.WordpressInstanceAutoIP
+  WordpressLaunchTemplateId:
+    Value: !GetAtt AppServerStack.Outputs.WordpressLaunchTemplateId
+  EfsId:
+    Value: !GetAtt ContentStorageStack.Outputs.EfsId
   PreStageSnapshotDocumentName:
     Value: !GetAtt AutomationStack.Outputs.PreStageSnapshotDocumentName
-  MigrateLocalMariaDbToRdsDocumentName:
-    Value: !GetAtt AutomationStack.Outputs.MigrateLocalMariaDbToRdsDocumentName
   AutomationRoleArn:
     Value: !GetAtt AutomationStack.Outputs.AutomationRoleArn
   VpcId:

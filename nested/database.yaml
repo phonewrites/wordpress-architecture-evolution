@@ -2,6 +2,8 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: WordPress evolution RDS MySQL database.
 
 Parameters:
+  RootStackName:
+    Type: String
   VpcId:
     Type: AWS::EC2::VPC::Id
   DbSubnetAId:
@@ -49,6 +51,7 @@ Resources:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Delete
     Properties:
+      DBInstanceIdentifier: !Sub '${RootStackName}-rds'
       Engine: mysql
       EngineVersion: '8.4.8'
       DBName: !Ref DBNameValue

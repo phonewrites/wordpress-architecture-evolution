@@ -17,6 +17,7 @@ Resources:
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
         - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess
       Policies:
         - PolicyName: wordpress-parameter-read
           PolicyDocument:

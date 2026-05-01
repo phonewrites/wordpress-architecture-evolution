@@ -30,17 +30,17 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.us-east-1.amazonaws.com/cf-templates-xunea76zqzgs-us-east-1/090d0d833437db69d87986667aa4e332.template
+        https://s3.us-east-1.amazonaws.com/cf-templates-xunea76zqzgs-us-east-1/8ec44aebe8ef431e83e1e5cf6c7c66ee.template
   SharedSsmStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.us-east-1.amazonaws.com/cf-templates-xunea76zqzgs-us-east-1/4efaf4fdd30b6ab17253e310d343f078.template
+        https://s3.us-east-1.amazonaws.com/cf-templates-xunea76zqzgs-us-east-1/e38468bdf61427428d7a60c7cad79df8.template
   IamStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: 
-        https://s3.us-east-1.amazonaws.com/cf-templates-xunea76zqzgs-us-east-1/9610d5e81cf3597e10cb87dd3bf46510.template
+        https://s3.us-east-1.amazonaws.com/cf-templates-xunea76zqzgs-us-east-1/af54ee4d651d23c5255102a6e7b05139.template
   AutomationStack:
     Type: AWS::CloudFormation::Stack
     Properties:
