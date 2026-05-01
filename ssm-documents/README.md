@@ -1,25 +1,26 @@
 # SSM Automation Documents
 
-This directory holds CloudFormation templates that create `AWS::SSM::Document`
-resources with `DocumentType: Automation`.
+These documents hold the imperative steps that should not be modeled as
+CloudFormation resources. CloudFormation creates the documents through
+`nested/automation.yaml`; the operator runs them between stage updates.
 
-Current runbooks:
+## Documents
 
-- `pre-stage-snapshot.yaml` - create an operator-controlled pre-upgrade snapshot or AMI.
-- `migrate-local-mariadb-to-rds.yaml` - dump local MariaDB and import into RDS.
+- `Wordpress-PreStageSnapshot`: creates an AMI from the current WordPress EC2
+  instance and tags the AMI and backing snapshot with the source stage, stack, and
+  instance ID.
+- `Wordpress-MigrateLocalMariaDbToRds`: dumps local MariaDB from the stage 2
+  instance and imports it into the stage 3 RDS database.
 
-Planned runbooks:
+## Where They Fit
 
-- `copy-local-wp-content-to-efs.yaml` - copy WordPress content files to EFS.
-- `rewrite-wordpress-url.yaml` - update `home`, `siteurl`, and embedded content URLs.
-- `release-stage4-instance.yaml` - release singleton instance termination protection before stage 5.
-- `validate-wordpress-state.yaml` - smoke-check posts, media paths, DB endpoint, and wp-content writability.
+- Stage 1 -> 2: run `Wordpress-PreStageSnapshot` against the stage 1 instance,
+  then update to stage 2 with `SourceAmiId`.
+- Stage 2 -> 3: update to stage 3 `prepare`, run
+  `Wordpress-MigrateLocalMariaDbToRds`, run `Wordpress-PreStageSnapshot` against
+  the same stage 2 instance, then update to stage 3 `cutover`.
+- Stage 3 -> 4: run `Wordpress-PreStageSnapshot` against the stage 3 instance,
+  then update to stage 4 with `SourceAmiId`.
+- Stage 4 -> 5: no SSM document is needed because state already lives in RDS and
+  EFS.
 
-Runbooks are intentionally invoked by the operator in this iteration, preferably
-from the Systems Manager Automation console for beginner-facing walkthroughs:
-
-1. Start SSM Automation.
-2. Confirm it succeeds.
-3. Update the CloudFormation stack to the next stage.
-
-CloudFormation-triggered lifecycle automation is reserved for a later iteration.

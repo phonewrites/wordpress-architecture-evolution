@@ -1,24 +1,43 @@
 # Nested Templates
 
-This directory holds CloudFormation modules used by the stage root templates.
+The stage roots in `stages/` compose these nested templates. The root stack owns
+the user-facing workflow; the nested stacks keep infrastructure layers stable as
+the application architecture evolves.
 
-Current modules:
+## Shared Layers
 
-- `network.yaml` - VPC, IPv4/IPv6 CIDRs, public/app/database subnets, route tables, IGW.
-- `shared-ssm.yaml` - fixed `/Wordpress/...` Parameter Store names and public endpoint values.
-- `iam.yaml` - EC2 instance profiles and SSM Automation roles.
-- `automation.yaml` - SSM Automation role, pre-stage AMI document, and local MariaDB to RDS migration document.
-- `single-server.yaml` - stage 1 standalone EC2 with local MariaDB.
-- `single-server-lt.yaml` - stage 2 standalone EC2 via launch template.
-- `database.yaml` - RDS subnet group, database security group, and RDS MySQL instance.
-- `app-rds.yaml` - stage 3 singleton WordPress app instance backed by RDS.
+- `network.yaml`: VPC, IPv4/IPv6 networking, public subnets, app subnets, database
+  subnets, route tables, and internet gateway.
+- `iam.yaml`: EC2 instance profile and SSM Automation role.
+- `automation.yaml`: creates the SSM Automation documents used during updates.
+- `shared-ssm.yaml`: writes fixed `/Wordpress/...` SSM parameters used by app
+  bootstrap scripts.
 
-Planned modules:
+These layers appear in most stages and keep names/outputs consistent.
 
-- `filesystem.yaml` - EFS file system and mount targets.
-- `singleton-app.yaml` - stage 4 single WordPress app instance with EFS.
-- `alb-asg.yaml` - stage 5 ALB, target group, ASG, launch template, scaling policy.
-- `dns-acm.yaml` - optional Route53/ACM custom domain support.
+## Application Layers
 
-Do not add Lambda-backed custom resources here. Imperative migration work belongs in
-SSM Automation documents under `ssm-documents/`.
+- `single-server.yaml`: stage 1 EC2 with Apache, WordPress, and local MariaDB.
+- `single-server-lt.yaml`: stage 2 EC2 using a launch template and optional
+  `SourceAmiId`.
+- `app-rds.yaml`: stage 3 single app instance backed by RDS.
+- `app-efs.yaml`: stage 4 single app instance backed by RDS and EFS.
+- `alb-asg.yaml`: stage 5 ALB, target group, launch template, Auto Scaling Group,
+  scaling alarms, optional ACM certificate, and optional Route 53 alias.
+
+## Durable State Layers
+
+- `database.yaml`: RDS MySQL, DB subnet group, database security group, and
+  `/Wordpress/DBEndpoint` integration.
+- `content-storage.yaml`: EFS file system, mount targets, and security group for
+  shared `wp-content`.
+
+## Integration Rules
+
+- Package root templates before deployment so local nested paths become S3
+  `TemplateURL` values.
+- Keep durable nested stacks stable across updates: RDS and EFS should survive app
+  tier replacement.
+- Keep imperative data movement in SSM Automation, not CloudFormation custom
+  resources.
+- Do not add new Lambda-backed custom resources for this lab path.
