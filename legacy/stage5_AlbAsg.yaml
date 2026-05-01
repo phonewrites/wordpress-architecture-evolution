@@ -1,57 +1,14 @@
-# Create the /Wordpress/DBPassword SecureString before deploying; see README.md.
+# IMPORTANT: Refer to the .md file for instructions on creating the DBPassword
+# SecureString parameter manually before deploying this template.
 AWSTemplateFormatVersion: 2010-09-09
 Transform: 'AWS::LanguageExtensions'
-Description: >-
-  WordPress application AWS architecture evolution - Stage 5
-  Auto Scaling group behind ALB, with RDS database and EFS shared storage
+Description: WordPress application AWS architecture evolution - Stage 5 (Auto-scaling EC2 instances with ALB, RDS database, & EFS shared storage)
 Parameters:
   LatestAmiId:
     Description: Latest Amazon Linux 2023 AMI.
     #Automatically fetches latest AL2023 AMI ID from AWS Systems Manager
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
-  Subdomain:
-    Type: String
-    Default: ''
-    AllowedPattern: '^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
-    ConstraintDescription: Empty or a DNS label such as "myblog".
-    Description: >-
-      Empty: use ALB HTTP URL. Non-empty: first label for the custom WordPress URL, e.g. myblog.
-  RootDomain:
-    Type: String
-    Default: ''
-    AllowedPattern: '^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-    ConstraintDescription: Empty or a hosted zone name such as example.com.
-    Description: >-
-      Empty: use ALB HTTP URL. Non-empty: Route 53 hosted zone name for the custom WordPress URL, e.g. example.com.
-  Stage4CutoverMode:
-    Type: String
-    Default: auto
-    AllowedValues:
-      - auto
-      - require
-    Description: >-
-      auto: greenfield or stage4-to-stage5 update. require: fail the update unless this same stack still contains the
-      stage4 WordpressEC2 singleton so its termination protection can be released. Stage4 data is preserved through
-      existing RDSinstance and WordpressEFS logical resources; the stage4 root snapshot is only a rollback backup.
-
-Rules:
-  CustomDomainBothOrNeither:
-    Assertions:
-      - Assert: !Or
-          - !And
-            - !Equals [!Ref Subdomain, '']
-            - !Equals [!Ref RootDomain, '']
-          - !And
-            - !Not [!Equals [!Ref Subdomain, '']]
-            - !Not [!Equals [!Ref RootDomain, '']]
-        AssertDescription: >-
-          Set both Subdomain and RootDomain, or leave both empty.
-
-Conditions:
-  HasCustomDomain: !And
-    - !Not [!Equals [!Ref Subdomain, '']]
-    - !Not [!Equals [!Ref RootDomain, '']]
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.12-x86_64'
 
 Resources:
 
@@ -73,7 +30,6 @@ Resources:
       AvailabilityZone: !Select [ 0, !GetAZs '' ]
       CidrBlock: 10.125.0.0/20
       MapPublicIpOnLaunch: true
-      AssignIpv6AddressOnCreation: true
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
@@ -90,7 +46,6 @@ Resources:
       AvailabilityZone: !Select [ 1, !GetAZs '' ]
       CidrBlock: 10.125.16.0/20
       MapPublicIpOnLaunch: true
-      AssignIpv6AddressOnCreation: true
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
@@ -107,7 +62,6 @@ Resources:
       AvailabilityZone: !Select [ 2, !GetAZs '' ]
       CidrBlock: 10.125.32.0/20
       MapPublicIpOnLaunch: true
-      AssignIpv6AddressOnCreation: true
       Ipv6CidrBlock: 
         Fn::Sub:
           - "${VpcPart}${SubnetPart}"
@@ -271,6 +225,83 @@ Resources:
       SubnetId: !Ref SubnetPublicC
       RouteTableId:
         Ref: RTPublic
+  IPv6WorkaroundSubnetPublicA:
+    Type: Custom::SubnetModify
+    Properties:
+      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
+      SubnetId: !Ref SubnetPublicA
+  IPv6WorkaroundSubnetPublicB:
+    Type: Custom::SubnetModify
+    Properties:
+      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
+      SubnetId: !Ref SubnetPublicB
+  IPv6WorkaroundSubnetPublicC:
+    Type: Custom::SubnetModify
+    Properties:
+      ServiceToken: !GetAtt IPv6WorkaroundLambda.Arn
+      SubnetId: !Ref SubnetPublicC
+  IPv6WorkaroundRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "ipv6-fix-logs-${AWS::StackName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: !Sub "ipv6-fix-modify-${AWS::StackName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - ec2:ModifySubnetAttribute
+              Resource: "*"
+  IPv6WorkaroundLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: "index.lambda_handler"
+      # Custom resource Lambda to enable IPv6 auto-assignment on public subnets
+      # (CloudFormation doesn't natively support this via AssignIpv6AddressOnCreation)
+      Code: # cfnresponse import required to send response back to CloudFormation
+        ZipFile:
+          Fn::Sub: |
+            import cfnresponse
+            import boto3
+
+            def lambda_handler(event, context):
+                if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, event.get('PhysicalResourceId', 'delete'))
+                  return
+
+                responseValue = event['ResourceProperties']['SubnetId']
+                ec2 = boto3.client('ec2', region_name='${AWS::Region}')
+                ec2.modify_subnet_attribute(AssignIpv6AddressOnCreation={
+                                                'Value': True
+                                              },
+                                              SubnetId=responseValue)
+                responseData = {}
+                responseData['SubnetId'] = responseValue
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+      Runtime: python3.9
+      Role: !GetAtt IPv6WorkaroundRole.Arn
+      Timeout: 30
+
 # SSM Parameters for WordPress configuration
   DBName:
     Type: AWS::SSM::Parameter
@@ -310,178 +341,6 @@ Resources:
       Type: String
       #Stage 5: ALB DNS used for WordPress URLs
       Value: !GetAtt WordpressALB.DNSName
-  WordpressPublicURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: "/Wordpress/PublicURL"
-      Description: "Public URL WordPress should use for home and siteurl"
-      Type: String
-      Value: !If
-        - HasCustomDomain
-        - !Sub 'https://${Subdomain}.wp.${RootDomain}'
-        - !Sub 'http://${WordpressALB.DNSName}'
-
-# Optional Route 53 + ACM resources for custom WordPress URL
-  HostedZoneLookupRole:
-    Type: AWS::IAM::Role
-    Condition: HasCustomDomain
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub hosted-zone-lookup-${AWS::StackName}
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - route53:ListHostedZonesByName
-                Resource: '*'
-
-  HostedZoneLookupLambda:
-    Type: AWS::Lambda::Function
-    Condition: HasCustomDomain
-    Properties:
-      Handler: index.handler
-      Runtime: python3.12
-      Role: !GetAtt HostedZoneLookupRole.Arn
-      Timeout: 60
-      Code:
-        ZipFile: |
-          import cfnresponse
-          import boto3
-
-          def handler(event, context):
-              phys = event.get("PhysicalResourceId") or "hosted-zone-lookup"
-              try:
-                  if event["RequestType"] == "Delete":
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, phys)
-                      return
-                  domain = (event["ResourceProperties"].get("DomainName") or "").rstrip(".") + "."
-                  r53 = boto3.client("route53")
-                  zones = r53.list_hosted_zones_by_name(DNSName=domain).get("HostedZones", [])
-                  matches = [z for z in zones if z["Name"] == domain and not z.get("Config", {}).get("PrivateZone")]
-                  if not matches:
-                      raise ValueError("Route 53 hosted zone not found: " + domain)
-                  zone_id = matches[0]["Id"].split("/")[-1]
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {"HostedZoneId": zone_id}, zone_id)
-              except Exception as e:
-                  print(repr(e))
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)[:2048]}, phys)
-
-  HostedZoneLookup:
-    Type: Custom::HostedZoneLookup
-    Condition: HasCustomDomain
-    Properties:
-      ServiceToken: !GetAtt HostedZoneLookupLambda.Arn
-      DomainName: !Ref RootDomain
-
-  WordpressCertificate:
-    Type: AWS::CertificateManager::Certificate
-    Condition: HasCustomDomain
-    Properties:
-      DomainName: !Sub '${Subdomain}.wp.${RootDomain}'
-      ValidationMethod: DNS
-      DomainValidationOptions:
-        - DomainName: !Sub '${Subdomain}.wp.${RootDomain}'
-          HostedZoneId: !GetAtt HostedZoneLookup.HostedZoneId
-
-  WordpressAliasRecord:
-    Type: AWS::Route53::RecordSet
-    Condition: HasCustomDomain
-    Properties:
-      HostedZoneId: !GetAtt HostedZoneLookup.HostedZoneId
-      Name: !Sub '${Subdomain}.wp.${RootDomain}'
-      Type: A
-      AliasTarget:
-        DNSName: !GetAtt WordpressALB.DNSName
-        HostedZoneId: !GetAtt WordpressALB.CanonicalHostedZoneID
-        EvaluateTargetHealth: true
-
-# Let CloudFormation remove the former stage4 singleton instance during update
-  Stage4InstanceReleaseRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub stage4-instance-release-${AWS::StackName}
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - cloudformation:DescribeStackResource
-                Resource: !Sub
-                  'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
-              - Effect: Allow
-                Action:
-                  - ec2:ModifyInstanceAttribute
-                Resource: '*'
-
-  Stage4InstanceReleaseLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.handler
-      Runtime: python3.12
-      Role: !GetAtt Stage4InstanceReleaseRole.Arn
-      Timeout: 60
-      Code:
-        ZipFile: |
-          import cfnresponse
-          import boto3
-
-          def handler(event, context):
-              phys = event.get("PhysicalResourceId") or "stage4-instance-release"
-              try:
-                  if event["RequestType"] == "Delete":
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, phys)
-                      return
-                  props = event["ResourceProperties"]
-                  stack = props["StackName"]
-                  mode = props.get("CutoverMode", "auto")
-                  cfn = boto3.client("cloudformation")
-                  ec2 = boto3.client("ec2")
-                  try:
-                      res = cfn.describe_stack_resource(StackName=stack, LogicalResourceId="WordpressEC2")
-                      instance_id = res["StackResourceDetail"]["PhysicalResourceId"]
-                  except Exception as e:
-                      print("No stage4 WordpressEC2 to release", repr(e))
-                      if mode == "require":
-                          raise ValueError("Stage4CutoverMode=require but this stack has no stage4 WordpressEC2 resource")
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {"Skipped": "true"}, phys)
-                      return
-                  if instance_id.startswith("i-"):
-                      ec2.modify_instance_attribute(
-                          InstanceId=instance_id,
-                          DisableApiTermination={"Value": False},
-                      )
-                      phys = instance_id
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {"InstanceId": instance_id}, phys)
-              except Exception as e:
-                  print(repr(e))
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)[:2048]}, phys)
-
-  Stage4InstanceRelease:
-    Type: Custom::Stage4InstanceRelease
-    Properties:
-      ServiceToken: !GetAtt Stage4InstanceReleaseLambda.Arn
-      StackName: !Ref AWS::StackName
-      CutoverMode: !Ref Stage4CutoverMode
 
 # WordPress auto-scaling with ALB + ASG + RDS + EFS
   SGWordpress:
@@ -489,13 +348,13 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       GroupName: wordpress-sg
-      GroupDescription: "Allow HTTP traffic to WordPress web server"
+      GroupDescription: "Restricted access to Wordpress instances"
       SecurityGroupIngress: 
-        - Description: "Allow HTTP from ALB only (port 80)"
+        - Description: "Allow HTTP IPv4 from anywhere (port 80)"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
-          SourceSecurityGroupId: !Ref SGALB
+          CidrIp: '0.0.0.0/0'  #Restrict to ALB security group only in production
   SGDatabase:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -525,24 +384,13 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       GroupName: alb-sg
-      GroupDescription: "Allow public traffic to Application Load Balancer"
+      GroupDescription: "Allow HTTP traffic to Application Load Balancer"
       SecurityGroupIngress: 
         - Description: "Allow HTTP IPv4 from anywhere (port 80)"
           IpProtocol: tcp
           FromPort: '80'
           ToPort: '80'
           CidrIp: '0.0.0.0/0'  # Production: use CloudFront or restrict as needed
-  SGALBHttpsIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Condition: HasCustomDomain
-    Properties:
-      GroupId: !Ref SGALB
-      Description: "Allow HTTPS IPv4 from anywhere (port 443)"
-      IpProtocol: tcp
-      FromPort: '443'
-      ToPort: '443'
-      CidrIp: '0.0.0.0/0'
-  WordpressInstanceProfile:
     Type: 'AWS::IAM::InstanceProfile'
     Properties:
       Path: /
@@ -565,18 +413,8 @@ Resources:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
         - "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess"
-      Policies:
-        # Let ASG instances signal CloudFormation when WordPress bootstrap finishes.
-        - PolicyName: cfn-signal
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action: cloudformation:SignalResource
-                Resource: !Sub
-                  'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
 
-# Launch template for ASG instances: app only, EFS for content, ALB DNS or custom domain for WordPress URLs
+ #Launch template for ASG instances: app only, EFS for content, ALB DNS for WordPress URLs
   WordpressLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     DependsOn:
@@ -585,7 +423,6 @@ Resources:
       - DBEndpoint
       - EFSfsid
       - ALBDNSName
-      - WordpressPublicURL
     Properties:
       LaunchTemplateName: "Wordpress"
       VersionDescription: "Launches app only. Uses EFS for content. ALB home added to WP Database."
@@ -606,35 +443,23 @@ Resources:
           HttpPutResponseHopLimit: 2
         UserData:
           Fn::Base64: !Sub |
-            #!/bin/bash
-            if ! rpm -q aws-cfn-bootstrap >/dev/null 2>&1; then dnf install -y aws-cfn-bootstrap; fi
-            _cfn_exit() {
-              local s=$?
-              if [ -x /opt/aws/bin/cfn-signal ]; then
-                /opt/aws/bin/cfn-signal -e "$s" --stack ${AWS::StackId} --resource WordpressASG --region ${AWS::Region}
-              fi
-            }
-            trap _cfn_exit EXIT
-            set -xe
+            #!/bin/bash -xe
             # Step 1 - Import parameter store values
             DBName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBName --query Parameters[0].Value --output text)
             DBUser=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBUser --query Parameters[0].Value --output text)
             DBPassword=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBPassword --with-decryption --query Parameters[0].Value --output text)
             DBEndpoint=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/DBEndpoint --query Parameters[0].Value --output text)
             EFSfsid=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/EFSfsid --query Parameters[0].Value --output text)
-            PublicURL=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/PublicURL --query Parameters[0].Value --output text)
-            ALBURL="http://${WordpressALB.DNSName}"
-            # Step 2 - Run system updates
-            dnf -y --refresh upgrade || true
+            ALBDNSName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/ALBDNSName --query Parameters[0].Value --output text)
+            # Step 2 - System Updates
+            dnf -y update
+            dnf -y upgrade
             # Step 3 - Install system software - Web server only (no local database)
-            dnf install -y wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel
-            dnf install -y curl rsync || true
-            dnf install -y stress || true
-            dnf install -y amazon-efs-utils || true
+            dnf install wget httpd php php-mysqlnd php-fpm php-mysqli php-json php-mbstring php-xml php-gd php-opcache php-intl php-zip php-devel stress amazon-efs-utils -y
             # Step 4 - Web Server Online - and set to startup
             systemctl enable httpd
             systemctl start httpd
-            # Step 5 - Download & install Wordpress
+            # Step 5 - Download & install Wordpress BEFORE mounting EFS
             wget https://wordpress.org/latest.tar.gz -P /var/www/html
             cd /var/www/html
             tar -zxvf latest.tar.gz
@@ -647,131 +472,36 @@ Resources:
             sed -i "s/'username_here'/'$DBUser'/g" wp-config.php
             sed -i "s/'password_here'/'$DBPassword'/g" wp-config.php
             sed -i "s/'localhost'/'$DBEndpoint'/g" wp-config.php
-            # Step 7 - Use the public load balancer address for Wordpress site links
-            if ! grep -q 'Follow load balancer public URL' wp-config.php; then
-              WPCONFIG_INSERT_TMP=$(mktemp)
-              WPCONFIG_MERGED_TMP=$(mktemp)
-              cat > "$WPCONFIG_INSERT_TMP" <<WPCONFIG_EOF
-            /* Follow load balancer public URL for WP_HOME and WP_SITEURL. */
-            if (!empty(\$_SERVER['HTTP_X_FORWARDED_PROTO']) && \$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
-                \$_SERVER['HTTPS'] = 'on';
-            }
-            define('WP_HOME', '$PublicURL');
-            define('WP_SITEURL', '$PublicURL');
-            WPCONFIG_EOF
-              awk 'NR==FNR { buf = buf $0 ORS; next } /stop editing! Happy publishing/ && !done { printf "%s", buf; done=1 } { print }' "$WPCONFIG_INSERT_TMP" wp-config.php > "$WPCONFIG_MERGED_TMP"
-              mv "$WPCONFIG_MERGED_TMP" wp-config.php
-              rm -f "$WPCONFIG_INSERT_TMP"
-            fi
-            # Step 8 - Mount shared wp-content from EFS
-            EFS_DNS_NAME="$EFSfsid.efs.${AWS::Region}.amazonaws.com"
-            EFS_FSTAB_SPEC="$EFSfsid:/"
-            EFS_FSTAB_TYPE="efs"
-            EFS_FSTAB_OPTIONS="_netdev,tls,iam"
-            mount_wp_content_efs() {
-              EFS_MOUNT_TARGET="$1"
-              if mount -t efs -o tls,iam "$EFSfsid:/" "$EFS_MOUNT_TARGET" 2>/dev/null; then
-                EFS_FSTAB_SPEC="$EFSfsid:/"
-                EFS_FSTAB_TYPE="efs"
-                EFS_FSTAB_OPTIONS="_netdev,tls,iam"
-                return 0
-              fi
-              if mount -t efs -o tls "$EFSfsid:/" "$EFS_MOUNT_TARGET" 2>/dev/null; then
-                EFS_FSTAB_SPEC="$EFSfsid:/"
-                EFS_FSTAB_TYPE="efs"
-                EFS_FSTAB_OPTIONS="_netdev,tls"
-                return 0
-              fi
-              if mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport "$EFS_DNS_NAME:/" "$EFS_MOUNT_TARGET" 2>/dev/null; then
-                EFS_FSTAB_SPEC="$EFS_DNS_NAME:/"
-                EFS_FSTAB_TYPE="nfs4"
-                EFS_FSTAB_OPTIONS="_netdev,nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport"
-                return 0
-              fi
-              return 1
-            }
-            mkdir -p /mnt/wp-content-efs
-            for attempt in $(seq 1 60); do
-              if mountpoint -q /mnt/wp-content-efs; then break; fi
-              mount_wp_content_efs /mnt/wp-content-efs || true
-              mountpoint -q /mnt/wp-content-efs && break
-              sleep 5
-            done
-            if ! mountpoint -q /mnt/wp-content-efs; then
-              echo "FATAL: could not mount EFS $EFSfsid at /mnt/wp-content-efs" >&2
-              exit 1
-            fi
-            if [ -z "$(ls -A /mnt/wp-content-efs 2>/dev/null)" ]; then
-              if command -v rsync >/dev/null 2>&1; then
-                rsync -a /var/www/html/wp-content/ /mnt/wp-content-efs/
-              else
-                cp -a /var/www/html/wp-content/. /mnt/wp-content-efs/
-              fi
-            fi
-            umount /mnt/wp-content-efs 2>/dev/null || true
+            # Step 7 - Migrate wp-content to EFS
+            mkdir -p /var/www/html/wp-content-backup
+            cp -r /var/www/html/wp-content/* /var/www/html/wp-content-backup/
             rm -rf /var/www/html/wp-content
             mkdir -p /var/www/html/wp-content
-            if ! grep -qE '^[^#].*[[:space:]]/var/www/html/wp-content[[:space:]]+efs[[:space:]]' /etc/fstab; then
-              echo "$EFS_FSTAB_SPEC /var/www/html/wp-content $EFS_FSTAB_TYPE $EFS_FSTAB_OPTIONS 0 0" >> /etc/fstab
-            fi
-            mount_wp_content_efs /var/www/html/wp-content
-            mkdir -p /var/www/html/wp-content/uploads
-            # Step 9 - Fix the permissions
+            echo -e "$EFSfsid:/ /var/www/html/wp-content efs _netdev,tls,iam 0 0" >> /etc/fstab
+            mount -a -t efs defaults
+            cp -r /var/www/html/wp-content-backup/* /var/www/html/wp-content/
+            rm -rf /var/www/html/wp-content-backup
+            # Step 8 - Fix the permissions
             usermod -a -G apache ec2-user   
             chown -R ec2-user:apache /var/www
             chmod 2775 /var/www
-            find /var/www -type d -exec chmod 2775 {} \; 2>/dev/null || true
-            find /var/www -type f -exec chmod 0664 {} \; 2>/dev/null || true
-            SELINUX_STATE=$(getenforce 2>/dev/null || true)
-            if [ "$SELINUX_STATE" = "Enforcing" ] || [ "$SELINUX_STATE" = "Permissive" ]; then
-              setsebool -P httpd_use_nfs 1 2>/dev/null || true
-            fi
-            # Step 10 - Point Wordpress content at the load balancer URL
-            if [ ! -f /var/www/html/wp-cli.phar ]; then
-              if command -v curl >/dev/null 2>&1; then
-                curl -fsSLo /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || true
-              fi
-              if [ ! -f /var/www/html/wp-cli.phar ]; then
-                wget -q -O /var/www/html/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || true
-              fi
-            fi
-            if [ -f /var/www/html/wp-cli.phar ]; then
-              wp_get_raw_option() {
-                WP_RAW_OPTION_NAME="$1" php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root eval 'global $wpdb; echo $wpdb->get_var($wpdb->prepare("select option_value from {$wpdb->options} where option_name=%s", getenv("WP_RAW_OPTION_NAME")));' 2>/dev/null || true
-              }
-              PREVIOUS_HOME_URL=$(wp_get_raw_option home)
-              PREVIOUS_SITEURL=$(wp_get_raw_option siteurl)
-              if [ -z "$PREVIOUS_HOME_URL" ]; then
-                PREVIOUS_HOME_URL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get home 2>/dev/null || true)
-              fi
-              if [ -z "$PREVIOUS_SITEURL" ]; then
-                PREVIOUS_SITEURL=$(php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option get siteurl 2>/dev/null || true)
-              fi
-              wp_search_replace_if_changed() {
-                SEARCH_REPLACE_OLD_VALUE="$1"
-                SEARCH_REPLACE_NEW_VALUE="$2"
-                if [ -n "$SEARCH_REPLACE_OLD_VALUE" ] && [ "$SEARCH_REPLACE_OLD_VALUE" != "$SEARCH_REPLACE_NEW_VALUE" ]; then
-                  php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root search-replace "$SEARCH_REPLACE_OLD_VALUE" "$SEARCH_REPLACE_NEW_VALUE" --all-tables || true
-                fi
-              }
-              php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update home "$PublicURL" || true
-              php /var/www/html/wp-cli.phar --path=/var/www/html --allow-root option update siteurl "$PublicURL" || true
-              wp_search_replace_if_changed "$PREVIOUS_HOME_URL" "$PublicURL"
-              wp_search_replace_if_changed "$PREVIOUS_SITEURL" "$PublicURL"
-              wp_search_replace_if_changed "$ALBURL" "$PublicURL"
-              PUBLIC_URL_HTTP=$(printf '%s' "$PublicURL" | sed 's|^https://|http://|')
-              wp_search_replace_if_changed "$PUBLIC_URL_HTTP" "$PublicURL"
-              for PREVIOUS_HOME_OR_SITEURL in "$PREVIOUS_HOME_URL" "$PREVIOUS_SITEURL"; do
-                [ -z "$PREVIOUS_HOME_OR_SITEURL" ] && continue
-                PREVIOUS_URL_WITHOUT_TRAILING_SLASHES=$(printf '%s' "$PREVIOUS_HOME_OR_SITEURL" | sed 's|/*$||')
-                PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST="$PREVIOUS_URL_WITHOUT_TRAILING_SLASHES/"
-                wp_search_replace_if_changed "$PREVIOUS_URL_WITHOUT_TRAILING_SLASHES" "$PublicURL"
-                wp_search_replace_if_changed "$PREVIOUS_URL_WITH_TRAILING_SLASH_AFTER_HOST" "$PublicURL"
-              done
-            else
-              echo "WARN: wp-cli download unavailable; skipping WordPress URL database refresh" >&2
-            fi
-            systemctl restart httpd
+            find /var/www -type d -exec chmod 2775 {} \;
+            find /var/www -type f -exec chmod 0664 {} \;
+            # Step 9 - Nested script to point Wordpress app's home to the DNS name of wordpress-alb
+            cat >> /home/ec2-user/ip-update.sh<< 'EOF'
+            #!/bin/bash
+            source <(php -r 'require("/var/www/html/wp-config.php"); echo("DB_NAME=".DB_NAME."; DB_USER=".DB_USER."; DB_PASSWORD=".DB_PASSWORD."; DB_HOST=".DB_HOST); ')
+            SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e"
+            OLD_URL=$(mysql -u $DB_USER -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
+            ALBDNSName=$(aws ssm get-parameters --region ${AWS::Region} --names /Wordpress/ALBDNSName --query Parameters[0].Value --output text)
+            $SQL_COMMAND "UPDATE wp_options SET option_value = replace(option_value, '$OLD_URL', 'http://$ALBDNSName') WHERE option_name = 'home' OR option_name = 'siteurl';"
+            $SQL_COMMAND "UPDATE wp_posts SET guid = replace(guid, '$OLD_URL','http://$ALBDNSName');"
+            $SQL_COMMAND "UPDATE wp_posts SET post_content = replace(post_content, '$OLD_URL', 'http://$ALBDNSName');"
+            $SQL_COMMAND "UPDATE wp_postmeta SET meta_value = replace(meta_value,'$OLD_URL','http://$ALBDNSName');"
+            EOF
+            chmod 755 /home/ec2-user/ip-update.sh
+            echo "/home/ec2-user/ip-update.sh" >> /etc/rc.local
+            /home/ec2-user/ip-update.sh
 
 # RDS resources needed to split Database from the WordpressEC2 instance
   RDSSubnetGroup:
@@ -856,25 +586,6 @@ Resources:
       Protocol: HTTP
       Port: 80
       DefaultActions: 
-        - !If
-          - HasCustomDomain
-          - Type: redirect
-            RedirectConfig:
-              Protocol: HTTPS
-              Port: '443'
-              StatusCode: HTTP_301
-          - Type: forward
-            TargetGroupArn: !Ref ALBTargetGroup
-  WordpressALBHttpsListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasCustomDomain
-    Properties:
-      LoadBalancerArn: !Ref WordpressALB
-      Protocol: HTTPS
-      Port: 443
-      Certificates:
-        - CertificateArn: !Ref WordpressCertificate
-      DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref ALBTargetGroup
   ALBTargetGroup:
@@ -889,21 +600,12 @@ Resources:
       # HealthCheckEnabled: true
       # HealthCheckProtocol: HTTP
       # HealthCheckPath: '/'
-      Matcher:
-        HttpCode: '200-399'
       ProtocolVersion:  HTTP1
 
 # Auto Scaling Group for WordPress instances
   WordpressASG:
     Type: AWS::AutoScaling::AutoScalingGroup
-    DependsOn:
-      - InternetGatewayAttachment
-      - WordpressALBHttpListener
-      - Stage4InstanceRelease
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: PT30M
+    DependsOn: InternetGatewayAttachment
     Properties:
       AutoScalingGroupName: wordpress-asg
       LaunchTemplate:
@@ -1011,8 +713,5 @@ Resources:
 
 Outputs:
   WordpressURL:
-    Description: Access WordPress at this URL.
-    Value: !If
-      - HasCustomDomain
-      - !Sub 'https://${Subdomain}.wp.${RootDomain}'
-      - !Sub 'http://${WordpressALB.DNSName}'
+    Description: Access WordPress installation at this URL (ALB DNS)
+    Value: !Sub 'http://${WordpressALB.DNSName}'

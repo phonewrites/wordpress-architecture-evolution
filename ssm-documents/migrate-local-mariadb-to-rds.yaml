@@ -1,0 +1,41 @@
+schemaVersion: '0.3'
+description: Dump local MariaDB on the stage 2 WordPress instance and import it into RDS.
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: IAM role ARN used by this automation.
+  SourceInstanceId:
+    type: String
+    description: Stage 2 WordPress EC2 instance ID.
+  RdsEndpoint:
+    type: String
+    description: RDS endpoint address.
+  RdsPort:
+    type: String
+    default: '3306'
+    description: RDS MySQL port.
+mainSteps:
+  - name: migrateDatabase
+    action: aws:runCommand
+    timeoutSeconds: 900
+    isEnd: true
+    inputs:
+      DocumentName: AWS-RunShellScript
+      InstanceIds:
+        - '{{ SourceInstanceId }}'
+      Parameters:
+        commands:
+          - |
+            #!/bin/bash
+            set -euo pipefail
+            IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            REGION=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            DBName=$(aws ssm get-parameters --region "$REGION" --names /Wordpress/DBName --query Parameters[0].Value --output text)
+            DBUser=$(aws ssm get-parameters --region "$REGION" --names /Wordpress/DBUser --query Parameters[0].Value --output text)
+            DBPassword=$(aws ssm get-parameters --region "$REGION" --names /Wordpress/DBPassword --with-decryption --query Parameters[0].Value --output text)
+            DUMP=/tmp/wp-stage3-migrate.sql
+            systemctl start mariadb || true
+            mysqldump -h127.0.0.1 -u"$DBUser" -p"$DBPassword" "$DBName" > "$DUMP"
+            mysql -h"{{ RdsEndpoint }}" -P"{{ RdsPort }}" -u"$DBUser" -p"$DBPassword" "$DBName" < "$DUMP"
+            rm -f "$DUMP"
