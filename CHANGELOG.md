@@ -2,6 +2,26 @@
 
 All notable changes are documented here following [Keep a Changelog](https://keepachangelog.com/) conventions.
 
+## [May 2026]
+
+### Added
+- Added nested root templates for stages 1–5, backed by reusable `nested/` modules and packaged `build/` artifacts.
+- Added SSM Automation documents for pre-stage AMI creation and local MariaDB to RDS migration.
+- Stage 5 can now create an optional HTTPS custom domain using Route 53 and ACM, with ALB DNS fallback.
+- Added concise runbook and architecture notes in `README.md`, `stages/`, `nested/`, `ssm-documents/`, and `legacy/`.
+
+### Changed
+- Current deployment path now uses `stages/` root templates; old monolithic templates moved under `legacy/`.
+- Stage evolution now uses explicit operator-run SSM Automation followed by CloudFormation stack updates.
+- Stage 5 now reuses existing RDS and EFS resources during stage 4 to stage 5 updates, then points WordPress at the ALB or custom domain URL.
+- RDS instance identifiers now use the root stack name while keeping `wordpressdb` as the WordPress schema name.
+
+### Fixed
+- Stage 1 no longer tries to create empty SSM parameters for later-stage values.
+- Nested Stage 3 greenfield stacks now leave `wp-content/uploads` writable on AL2023 with SELinux enabled.
+- Stage 5 now handles HTTPS admin redirects, ASG rolling updates, and mixed-case ALB URL rewrites during custom-domain updates.
+- Stage 5 no longer overwrites existing EFS `wp-content` when ASG instances start.
+
 ## [April 2026]
 
 ### Added
